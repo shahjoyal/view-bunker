@@ -83,6 +83,9 @@ function renderBunkerIntoSVG(svg, bunkerData, coalDB, bunkerIndex = 0, strokeOpe
   const layers = Array.isArray(bunkerData && bunkerData.layers) ? bunkerData.layers.slice() : [];
   const filtered = layers.map(l => ({ coal: l.coal || '', percent: safeNum(l.percent) || 0, gcv: safeNum(l.gcv), cost: safeNum(l.cost), rowIndex: l.rowIndex || null })).filter(l => l.percent > 0);
 
+  // --- reverse display order so the first layer in data renders last (top) ---
+  filtered.reverse();
+
   // build svg: defs + strokes + rects
   let inner = `<defs><clipPath id="${clipId}"><path d="${clipPathClosed}" /></clipPath></defs>`;
 
