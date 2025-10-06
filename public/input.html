@@ -4,21 +4,46 @@
   <meta charset="utf-8" />
   <title>Blend Dashboard — Bunkers</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <style>
+   <style>
     :root{
+      /* primary tunables - tweak these to change overall scaling */
       --bg:#F7F8FA; --card:#fff; --muted:#6b7280; --accent:#02008a;
       --sidebar-width:170px;
+      --topbar-height:64px;
+
+      /* bunker sizing (clamp will keep heights responsive) */
+      --bunker-min-height:220px;
+      --bunker-max-height:520px;
       --bunker-top-line-distance: 46px;
       --arrow-width: 3px;
-      --bunker-arrow-height: 220px;
+      --bunker-arrow-height: 90px;
       --arrow-head-size: 12px;
+
+      /* spacing */
+      --app-gap:12px;
+      --content-padding:12px;
     }
 
-    html,body{ margin:0; padding:0; width:100%; overflow-x:hidden; height:100%; font-family:Inter, system-ui, Arial; background:var(--bg); color:#111; }
+    /* --- Base layout: force app to exactly viewport height and remove page scroll --- */
+    html, body {
+      height:100%;
+      margin:0;
+      padding:0;
+      width:100%;
+      overflow-x:hidden;            /* no horizontal browser scroll */
+      overflow-y:hidden;            /* remove vertical browser scroll */
+      font-family:Inter, system-ui, Arial, sans-serif;
+      background:var(--bg);
+      color:#111;
+      -webkit-font-smoothing:antialiased;
+      -moz-osx-font-smoothing:grayscale;
+    }
 
+    /* app fills viewport exactly; children must scale internally */
     .app {
       display:flex;
-      min-height:100vh;
+      height:100vh;                 /* lock to viewport */
+      gap:var(--app-gap);
       box-sizing:border-box;
     }
 
@@ -32,6 +57,9 @@
       display:flex;
       flex-direction:column;
       gap:6px;
+      box-sizing:border-box;
+      flex-shrink:0;
+      min-width:120px;
     }
     .sidebar .title { font-weight:800; color:var(--accent); padding:8px 10px; font-size:13px; }
     .sidebar .item {
@@ -46,66 +74,145 @@
     .sidebar .item:hover { background:rgba(2,0,138,0.05); }
     .sidebar .item.active { background:var(--accent); color:#fff; box-shadow:0 6px 18px rgba(2,0,138,0.12); }
 
-    /* main content */
+    /* main area: reserve space for topbar and content; prevent page scroll */
     .main {
       flex:1;
-      padding:12px 18px;
+      display:flex;
+      flex-direction:column;
       box-sizing:border-box;
-      overflow-y:auto;
+      padding:12px 18px;
+      gap:12px;
+      min-width:0;                  /* important to prevent horizontal overflow */
+      height:100%;                  /* fill remaining height */
+      overflow:hidden;              /* no page scrolling — content will adapt inside */
     }
 
+    /* topbar fixed height */
     .topbar {
-      height:64px;
+      height:var(--topbar-height);
+      min-height:var(--topbar-height);
       display:flex;
       align-items:center;
       justify-content:space-between;
       gap:12px;
-      margin-bottom:8px;
+      margin-bottom:0;
+      flex-shrink:0;
     }
-    .topbar h1{ margin:0; font-size:16px; color:var(--accent); font-weight:800; }
-
+    .topbar h1{ margin:0; font-size:16px; color:var(--accent); font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .controls{ display:flex; gap:8px; align-items:center; }
     .controls input{ padding:8px 10px; border-radius:8px; border:1px solid #e6e6e6; width:110px; font-size:14px; background:#fff; cursor:pointer; }
 
-    .layout-card{ background:var(--card); border-radius:12px; padding:12px; box-shadow:0 10px 30px rgba(2,8,23,0.06); position:relative; overflow:visible; }
+    /* layout card becomes a column flex so inner parts can shrink/flow */
+    .layout-card{
+      background:var(--card);
+      border-radius:12px;
+      padding:12px;
+      box-shadow:0 10px 30px rgba(2,8,23,0.06);
+      position:relative;
+      overflow:visible;
+      display:flex;
+      flex-direction:column;
+      gap:12px;
+      height: calc(100% - var(--topbar-height) - 12px); /* fill remaining main area */
+      box-sizing:border-box;
+    }
 
-    .layout-row{ display:flex; gap:12px; align-items:flex-start; }
+    /* the main row is flexible and will wrap on small heights/widths */
+    .layout-row{
+      display:flex;
+      gap:12px;
+      align-items:flex-start;
+      flex:1 1 auto;
+      min-height:0; /* allow children to shrink */
+      flex-wrap:wrap; /* wrap if width is constrained */
+    }
 
-    .diagram-column{ flex:1 1 auto; min-width:0; }
-    .stats-column{ width:160px; flex-shrink:0; }
+    .diagram-column{
+      flex:1 1 0;
+      min-width:0;
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+      min-height:0;
+    }
+    .stats-column{
+      width:160px;
+      flex-shrink:0;
+      min-width:140px;
+    }
 
-    /* small compact stats panel */
+    /* stats panel stays visible but will shrink its content */
     .stats-panel{
-      width:100%; background:#02008a; color:#fff; padding:8px 10px; border-radius:8px;
+      width:100%;
+      background:#02008a;
+      color:#fff;
+      padding:8px 10px;
+      border-radius:8px;
       box-shadow:0 10px 22px rgba(2,8,23,0.10);
-      display:flex; flex-direction:column; gap:6px; z-index:20;
-      position:sticky; top:84px;
+      display:flex;
+      flex-direction:column;
+      gap:6px;
+      z-index:20;
+      position:sticky;
+      top: calc(var(--topbar-height) + 20px);
       font-size:13px;
     }
     .stat-row{ display:flex; justify-content:space-between; font-weight:700; }
     .stat-label{ opacity:0.95; font-weight:600; font-size:12px; color:rgba(255,255,255,0.95); }
     .stat-value{ font-weight:800; font-size:13px; }
 
-    .diagram-inner { position:relative; padding:8px; }
+    .diagram-inner { position:relative; padding:8px; min-height:0; display:flex; flex-direction:column; gap:8px; }
 
     .top-overlay { position: absolute; inset: 0 0 0 0; pointer-events: none; z-index: 90; }
-    /* top line black (solid) */
     .top-line { position: absolute; top: var(--bunker-top-line-distance); left: 4%; right: 4%; height: 3px; background: #000; opacity:1; }
 
     .arrow { position: absolute; width: var(--arrow-width); background: #000; top: calc(var(--bunker-top-line-distance) + 4px); height: var(--bunker-arrow-height); transform-origin: top center; }
     .arrow::after { content: ''; position: absolute; left: calc(50% - 8px); top: 100%; width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-top: var(--arrow-head-size) solid #000; }
 
-    /* bunkers - use flex so they shrink to fit width, preventing horizontal scroll */
-    .bunkers-grid{ display:flex; gap:18px; align-items:end; padding:18px; }
-    .bunker{ position:relative; flex:1 1 0; height:520px; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; min-width:0; }
-    .bunker svg{ width:100%; height:100%; max-height:480px; display:block; }
+    /* bunkers grid: allow wrapping so it never forces page size bigger than viewport */
+    .bunkers-grid{
+      display:flex;
+      gap:18px;
+      align-items:end;
+      padding:18px;
+      flex-wrap:wrap;          /* <-- important: wrap to new line if not enough width */
+      box-sizing:border-box;
+      justify-content:space-between;
+      width:100%;
+    }
+
+    /* bunker heights will scale within clamp to prevent overflow */
+    .bunker{
+      position:relative;
+      flex:1 1 14%;            /* allow shrink/grow; base width ~14% */
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      justify-content:flex-end;
+      min-width:120px;         /* prevents elements becoming too narrow */
+      box-sizing:border-box;
+      height: clamp(var(--bunker-min-height), 40vh, var(--bunker-max-height));
+      max-height: calc(var(--bunker-max-height));
+    }
+
+    /* svg occupies available bunker height but is constrained */
+    .bunker svg{ width:100%; height:100%; max-height:100%; display:block; object-fit:contain; }
     .bunker .label{ position:absolute; bottom:12px; left:50%; transform:translateX(-50%); background:rgba(255,255,255,0.98); padding:6px 10px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,0.06); font-weight:700; font-size:13px; white-space:nowrap; }
 
-    /* single-bunker view reduced height to avoid page scrolling */
-    .single-bunker-wrap { padding:20px; display:flex; justify-content:center; align-items:flex-start; }
-    .single-bunker { width:100%; max-width:920px; height:66vh; max-height:720px; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; position:relative; }
+    /* single-bunker view reduced sizes to avoid overflow */
+    .single-bunker-wrap { padding:12px; display:flex; justify-content:center; align-items:flex-start; }
+    .single-bunker {
+      width:100%;
+      max-width:920px;
+      height: clamp(240px, 66vh, 720px);
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      justify-content:flex-end;
+      position:relative;
+    }
     .single-bunker svg{ width:60%; height:92%; max-height:640px; display:block; }
-    .single-bunker .label{ position: absolute; bottom:20px; left:50%; transform:translateX(-50%); background:rgba(255,255,255,0.98); padding:8px 12px; border-radius:10px; font-weight:800; font-size:16px; }
+    .single-bunker .label{ position: absolute; bottom:20px; left:50%; transform:translateX(-50%); background:rgba(255,255,255,0.98); padding:8px 12px; border-radius:10px; font-weight:800; font-size:16px; white-space:nowrap; }
 
     /* tooltip */
     .coal-tooltip {
@@ -125,43 +232,52 @@
     }
 
     /* ---------- Coal Flow boxes (UI only) ---------- */
-.coal-flow-wrap { margin-top:12px; padding:0 0 18px; }
-.coal-flow-title { font-weight:800; margin:6px 18px 8px; color:var(--accent); font-size:14px; }
-.coal-flow-grid { display:flex; gap:18px; align-items:stretch; padding:0 18px; box-sizing:border-box; }
-.coal-box {
-  flex:1 1 0;
-  min-width:0;
-  height:56px;
-  display:flex;
-  flex-direction:column;
-  align-items:center;
-  justify-content:center;
-  border-radius:10px;
-  background:var(--card);
-  box-shadow:0 8px 20px rgba(2,8,23,0.06);
-  font-weight:800;
-  font-size:13px;
-}
-.coal-box .value { font-size:15px; }
-.coal-box .label { font-size:12px; color:var(--muted); font-weight:700; margin-top:4px; }
-
-  /* dims inactive layers and highlights the active (utilising) layer */
-  /* .bunker-util .util-inactive { opacity: 0.25; transition: opacity 300ms ease; }
-  .bunker-util .util-active   { opacity: 1 !important; transition: opacity 300ms ease; filter: drop-shadow(0 1px 4px rgba(0,0,0,0.25)); } */
-
-/* responsive: stack vertically on narrow screens */
-@media (max-width:1100px){
-  .coal-flow-grid { flex-direction:column; padding:0 8px; }
-  .coal-box { width:100%; height:64px; }
-}
-
-
-    @media (max-width:1100px){
-      .layout-row{ flex-direction:column; }
-      .stats-column{ width:100%; order:2; }
-      .sidebar{ display:none; } /* hide left sidebar on very small screens to save space */
-      .single-bunker svg{ width:80%; }
+    .coal-flow-wrap { margin-top:0; padding:0 0 8px; }
+    .coal-flow-title { font-weight:800; margin:6px 18px 8px; color:var(--accent); font-size:14px; }
+    .coal-flow-grid { display:flex; gap:12px; align-items:stretch; padding:0 18px; box-sizing:border-box; flex-wrap:wrap; }
+    .coal-box {
+      flex:1 1 14%;
+      min-width:110px;
+      height:56px;
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      justify-content:center;
+      border-radius:10px;
+      background:var(--card);
+      box-shadow:0 8px 20px rgba(2,8,23,0.06);
+      font-weight:800;
+      font-size:13px;
+      box-sizing:border-box;
     }
+    .coal-box .value { font-size:15px; }
+    .coal-box .label { font-size:12px; color:var(--muted); font-weight:700; margin-top:4px; }
+
+    /* responsive: stack vertically on narrow screens and shrink heights */
+    @media (max-width:1100px){
+      .layout-row{ flex-direction:column; gap:10px; }
+      .stats-column{ width:100%; order:2; }
+      .sidebar{ display:none; } /* hide left sidebar on narrow screens to save space */
+      .single-bunker svg{ width:80%; }
+      .coal-flow-grid { gap:8px; padding:0 8px; }
+      .coal-box { width:100%; flex-basis:auto; }
+      .bunkers-grid { padding:8px; gap:10px; }
+      .bunker { height: clamp(180px, 30vh, 380px); }
+    }
+
+    /* very short viewport (example: small laptop height) — make elements more compact */
+    @media (max-height:720px){
+      :root{
+        --bunker-top-line-distance: 36px;
+      }
+      .bunker { height: clamp(160px, 36vh, 420px); }
+      .coal-box { height:48px; }
+      .topbar { height:56px; }
+      .layout-card { padding:10px; }
+    }
+
+    /* ensure no element produces unintended browser scrollbar */
+    * { box-sizing:border-box; }
   </style>
 </head>
 <body>
@@ -213,6 +329,7 @@
                   <div class="bunker" data-bunker="4"><svg viewBox="0 0 100 150" preserveAspectRatio="xMidYMid meet"></svg><div class="label">Bunker 5</div></div>
                   <div class="bunker" data-bunker="5"><svg viewBox="0 0 100 150" preserveAspectRatio="xMidYMid meet"></svg><div class="label">Bunker 6</div></div>
                 </div>
+
                 <!-- Coal Flow boxes (ADD BELOW .bunkers-grid) -->
                 <div class="coal-flow-wrap">
                  <div class="coal-flow-title">Coal Flow</div>
@@ -300,9 +417,8 @@
   </div>
 
   <!-- floating tooltip element -->
-  <div id="coalTooltip" class="coal-tooltip" aria-hidden="true"></div>
-
-  <script src="/public/dashboard.js"></script>
+<div id="coalTooltip" class="coal-tooltip" aria-hidden="true"></div>
+<script src="/public/dashboard.js"></script>
 <script>
 /*
   Coal Flow binder
@@ -942,7 +1058,7 @@ Live "draining" visual for bunker layers based on NextBlendBinder timers.
 - Adds a small CSS transition so the layer looks like it's "going down" smoothly.
 Paste this after your NextBlendBinder & dashboard.js (or anywhere after the bunker SVGs exist).
 -->
-<style>
+<!-- <style>
   /* smooth SVG rect height/y changes */
   svg rect {
     transition: height 1s linear, y 1s linear, opacity 400ms ease;
@@ -955,7 +1071,7 @@ Paste this after your NextBlendBinder & dashboard.js (or anywhere after the bunk
   svg rect.util-inactive {
     opacity: 0.35;
   }
-</style>
+</style> -->
 
 <!--
 Animated bunker drain that strictly follows your existing per-bunker timers (bunkerTimers).
@@ -1653,7 +1769,164 @@ Paste this AFTER your existing scripts (the one that defines bunkerTimers/startO
 
 })();
 </script> -->
+<!-- <style>
+  svg rect {
+  transition: height 1s linear, y 1s linear, opacity 400ms ease;
+}
+svg rect.util-active {
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.25));
+  opacity: 1 !important;
+}
+svg rect.util-inactive {
+  opacity: 0.35;
+  transition: opacity 300ms ease;
+}
+svg rect {
+  transition: height 1s linear, y 1s linear, opacity 400ms ease;
+}
+svg rect.util-active {
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.25));
+  opacity: 1 !important;
+}
+svg rect.util-inactive {
+  opacity: 0.35;
+  transition: opacity 300ms ease;
+}
 
+</style>
+
+<script>
+let bunkerTimers = Array.from({length: 6}, () => null);
+
+
+function startOrUpdateBunkerTimer(bunkerIndex, layerSeconds, flow, bunkerCapacity) {
+  let bunkerTimer = bunkerTimers[bunkerIndex];
+  if (!bunkerTimer) {
+    bunkerTimer = {
+      bunkerIndex,
+      layerSeconds: [...layerSeconds], // seconds per layer
+      flow,
+      bunkerCapacity,
+      activeLayer: 0,
+      elapsedSec: 0,
+      intervalId: null
+    };
+    bunkerTimers[bunkerIndex] = bunkerTimer;
+  } else {
+    // Update values if needed
+    bunkerTimer.layerSeconds = [...layerSeconds];
+    bunkerTimer.flow = flow;
+    bunkerTimer.bunkerCapacity = bunkerCapacity;
+  }
+  if (!bunkerTimer.intervalId) {
+    bunkerTimer.intervalId = setInterval(() => {
+      updateBunkerColors(bunkerTimer);
+    }, 1000);
+  }
+}
+
+function updateBunkerColors(timer) {
+  const { bunkerIndex, layerSeconds, flow, bunkerCapacity, activeLayer } = timer;
+  if (activeLayer >= layerSeconds.length) {
+    clearInterval(timer.intervalId);
+    timer.intervalId = null;
+    return;
+  }
+  timer.elapsedSec++;
+
+  // Calculate fraction of current layer used
+  let currentDuration = layerSeconds[activeLayer];
+  let fractionLeft = Math.max(0, (currentDuration - timer.elapsedSec) / currentDuration);
+
+  // Get bunker SVG and layers rects
+  const bunkerSvg = document.querySelectorAll('.bunker')[bunkerIndex]?.querySelector('svg');
+  if (!bunkerSvg) return;
+  const rects = bunkerSvg.querySelectorAll('rect');
+
+  // Update heights - animate the active layer shrinking from top
+  for(let i = 0; i < rects.length; i++) {
+    const rect = rects[i];
+    let layerIndexFromBottom = rects.length - 1 - i;
+    
+    if (layerIndexFromBottom === activeLayer) {
+      // Get original full height
+      let fullHeight = parseFloat(rect.getAttribute('data-full-height'));
+      if (!fullHeight) {
+        fullHeight = rect.height.baseVal.value;
+        rect.setAttribute('data-full-height', fullHeight);
+      }
+      
+      // Calculate new height based on remaining time
+      let newHeight = fullHeight * fractionLeft;
+      let newY = 140 - newHeight; // 140 is bottomY
+      
+      rect.setAttribute('height', newHeight);
+      rect.setAttribute('y', newY);
+      rect.classList.add('util-active');
+      rect.classList.remove('util-inactive');
+    } else if (layerIndexFromBottom < activeLayer) {
+      // Already depleted layers
+      rect.setAttribute('height', 0);
+      rect.setAttribute('y', 140);
+      rect.classList.remove('util-active');
+      rect.classList.add('util-inactive');
+    } else {
+      // Future layers - keep full height
+      let fullHeight = parseFloat(rect.getAttribute('data-full-height'));
+      if (!fullHeight) {
+        fullHeight = rect.height.baseVal.value;
+        rect.setAttribute('data-full-height', fullHeight);
+      }
+      rect.setAttribute('height', fullHeight);
+      rect.setAttribute('y', 140 - fullHeight);
+      rect.classList.remove('util-active');
+      rect.classList.add('util-inactive');
+    }
+  }
+
+  if (timer.elapsedSec >= currentDuration) {
+    timer.activeLayer++;
+    timer.elapsedSec = 0;
+  }
+}
+// Start coal utilization animation for all bunkers
+function initializeCoalAnimation() {
+  const blend = window.LATESTBLEND;
+  if (!blend || !Array.isArray(blend.rows)) return;
+  
+  const flows = blend.flows || window.flows || [10, 10, 10, 10, 10, 10]; // Default flows
+  const bunkerCapacity = blend.bunkerCapacity || 100; // Default capacity
+  
+  for (let bunkerIndex = 0; bunkerIndex < 6; bunkerIndex++) {
+    // Calculate layer times based on percentages
+    const layerSeconds = [];
+    for (let r = blend.rows.length - 1; r >= 0; r--) {
+      const row = blend.rows[r];
+      let percent = 0;
+      if (Array.isArray(row.percentages) && row.percentages.length > bunkerIndex) {
+        percent = parseFloat(row.percentages[bunkerIndex]) || 0;
+      }
+      
+      if (percent > 0) {
+        // Calculate seconds for this layer: (percent/100 * capacity) / flow * 3600
+        const hours = (percent / 100.0 * bunkerCapacity) / (flows[bunkerIndex] || 10);
+        const seconds = Math.max(5, hours * 3600 / 10); // Scale down for demo, min 5 seconds
+        layerSeconds.push(seconds);
+      }
+    }
+    
+    if (layerSeconds.length > 0) {
+      startOrUpdateBunkerTimer(bunkerIndex, layerSeconds, flows[bunkerIndex] || 10, bunkerCapacity);
+    }
+  }
+}
+
+// Call after data is loaded
+setTimeout(() => {
+  initializeCoalAnimation();
+}, 1000);
+
+</script> -->
 
 <!-- <script>
 /*
@@ -1829,14 +2102,6 @@ Paste this AFTER your existing scripts (the one that defines bunkerTimers/startO
   });
 })();
 </script> -->
-
-
-
-
-
-
-
-
 <!-- Estimated Generation (MW) — precise mapping to NextBlendBinder's bottom-coal logic -->
 <!-- <script>
 (function(){
