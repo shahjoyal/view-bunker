@@ -197,7 +197,7 @@
 
     /* svg occupies available bunker height but is constrained */
     .bunker svg{ width:100%; height:100%; max-height:100%; display:block; object-fit:contain; }
-    .bunker .label{ position:absolute; bottom:12px; left:50%; transform:translateX(-50%); background:rgba(255,255,255,0.98); padding:6px 10px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,0.06); font-weight:700; font-size:13px; white-space:nowrap; }
+    .bunker .label{ position:absolute; bottom:5px; left:50%; transform:translateX(-50%); background:rgba(255,255,255,0.98); padding:6px 10px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,0.06); font-weight:700; font-size:13px; white-space:nowrap; }
 
     /* single-bunker view reduced sizes to avoid overflow */
     .single-bunker-wrap { padding:12px; display:flex; justify-content:center; align-items:flex-start; }
@@ -212,7 +212,7 @@
       position:relative;
     }
     .single-bunker svg{ width:60%; height:92%; max-height:640px; display:block; }
-    .single-bunker .label{ position: absolute; bottom:20px; left:50%; transform:translateX(-50%); background:rgba(255,255,255,0.98); padding:8px 12px; border-radius:10px; font-weight:800; font-size:16px; white-space:nowrap; }
+    .single-bunker .label{ position: absolute; bottom:-30px; left:50%; transform:translateX(-50%); background:rgba(255,255,255,0.98); padding:8px 12px; border-radius:10px; font-weight:800; font-size:16px; white-space:nowrap; }
 
     /* tooltip */
     .coal-tooltip {
@@ -1047,6 +1047,171 @@
   document.addEventListener('DOMContentLoaded', () => setTimeout(start, 600));
 })();
 </script>
+
+<style>
+  /* Block table styling (paste into your main <style>) */
+  .block-table-wrap { margin-top:10px; width:100%; }
+  .block-table {
+    width:100%;
+    border-collapse:collapse;
+    font-size:13px;
+    margin-top:6px;
+  }
+  .block-table thead th {
+    text-align:left;
+    font-weight:800;
+    font-size:12px;
+    padding:6px 8px;
+    opacity:0.95;
+    border-bottom:1px solid rgba(255,255,255,0.08);
+  }
+  .block-table tbody td {
+    padding:6px 8px;
+    font-weight:700;
+    border-bottom:1px dashed rgba(255,255,255,0.04);
+  }
+
+  .block-table {
+  width:100%;
+  border-collapse:collapse;  /* ensures borders merge cleanly */
+  font-size:13px;
+  margin-top:6px;
+  border:1px solid #fff;     /* outer border */
+}
+
+.block-table th,
+.block-table td {
+  border:1px solid #fff;     /* inner cell borders */
+  padding:6px 8px;
+  font-weight:700;
+  color:#fff;                /* keep text white inside dark panel */
+}
+
+.block-table thead th {
+  font-weight:800;
+  font-size:12px;
+  opacity:0.95;
+}
+
+  /* Make sure table looks good inside the dark stats-panel */
+  #statsPanel .block-table thead th,
+  #statsPanel .block-table tbody td { color: #fff; }
+  /* subtle background */
+  #statsPanel .block-table-wrap { background: rgba(255,255,255,0.02); padding:6px; border-radius:8px; }
+  /* small note style */
+  .block-table .note { font-weight:600; font-size:11px; opacity:0.9; margin-top:6px; }
+</style>
+
+<script>
+  (function () {
+    // Create and inject table wrapper into #statsPanel
+    const statsPanel = document.getElementById('statsPanel');
+    if (!statsPanel) return;
+
+    // avoid duplicate insertion
+    if (document.getElementById('blockTableWrap')) return;
+
+    const wrap = document.createElement('div');
+    wrap.id = 'blockTableWrap';
+    wrap.className = 'block-table-wrap';
+
+    wrap.innerHTML = `
+      <div style="font-size:13px;font-weight:800;margin-bottom:6px;">Next Blocks</div>
+      <table class="block-table" id="blockTable" aria-label="Next blocks table">
+        <thead>
+          <tr><th style="width:48%;">Block</th><th style="width:26%;">GCV</th><th style="width:26%;">Cost</th></tr>
+        </thead>
+        <tbody>
+          <tr id="blockRow-0"><td class="block-time">--</td><td id="gcv-0">--</td><td id="cost-0">--</td></tr>
+          <tr id="blockRow-1"><td class="block-time">--</td><td id="gcv-1">--</td><td id="cost-1">--</td></tr>
+          <tr id="blockRow-2"><td class="block-time">--</td><td id="gcv-2">--</td><td id="cost-2">--</td></tr>
+          <tr id="blockRow-3"><td class="block-time">--</td><td id="gcv-3">--</td><td id="cost-3">--</td></tr>
+        </tbody>
+      </table>
+      <div class="note" style="color:rgba(255,255,255,0.8);"></div>
+    `;
+
+    statsPanel.appendChild(wrap);
+
+    // Helper: format time hh:mm (24h)
+    function fmt(date) {
+      const hh = String(date.getHours()).padStart(2,'0');
+      const mm = String(date.getMinutes()).padStart(2,'0');
+      return `${hh}:${mm}`;
+    }
+
+    // Compute next quarter-aligned start from now.
+    function nextQuarterStart(now) {
+      // total minutes including fractional minute from seconds
+      const totalMinutes = now.getHours() * 60 + now.getMinutes() + now.getSeconds() / 60;
+      // ceil to next multiple of 15 (if already exactly on multiple, this returns that same multiple)
+      const startMinutes = Math.ceil(totalMinutes / 15) * 15;
+      const h = Math.floor(startMinutes / 60) % 24;
+      const m = startMinutes % 60;
+      const d = new Date(now.getTime());
+      d.setHours(h, m, 0, 0);
+      return d;
+    }
+
+    // Build the 4 block labels (e.g. "16:45 - 17:00")
+    function buildBlockLabels() {
+      const now = new Date();
+      const firstStart = nextQuarterStart(now);
+      const labels = [];
+      for (let i = 0; i < 4; i++) {
+        const start = new Date(firstStart.getTime() + i * 15 * 60 * 1000);
+        const end = new Date(start.getTime() + 15 * 60 * 1000);
+        labels.push(`${fmt(start)} - ${fmt(end)}`);
+      }
+      return labels;
+    }
+
+    // Public API: allow other code to populate GCV / Cost for a block index (0..3)
+    window.setBlockData = function (index, gcv, cost) {
+      if (index < 0 || index > 3) return;
+      const gcvCell = document.getElementById(`gcv-${index}`);
+      const costCell = document.getElementById(`cost-${index}`);
+      if (gcvCell) gcvCell.textContent = (gcv === null || gcv === undefined) ? '--' : String(gcv);
+      if (costCell) costCell.textContent = (cost === null || cost === undefined) ? '--' : String(cost);
+    };
+
+    // Fill table with calculated times (and keep current GCV/cost cells if set)
+    function updateBlockTable() {
+      const labels = buildBlockLabels();
+      for (let i = 0; i < 4; i++) {
+        const row = document.getElementById(`blockRow-${i}`);
+        if (!row) continue;
+        const timeCell = row.querySelector('.block-time');
+        if (timeCell) timeCell.textContent = labels[i];
+        // if GCV or cost are empty, keep '--'
+        const gcv = document.getElementById(`gcv-${i}`).textContent;
+        const cost = document.getElementById(`cost-${i}`).textContent;
+        if (!gcv || gcv.trim() === '') document.getElementById(`gcv-${i}`).textContent = '--';
+        if (!cost || cost.trim() === '') document.getElementById(`cost-${i}`).textContent = '--';
+      }
+    }
+
+    // initial render
+    updateBlockTable();
+
+    // Update frequently so the "next block" shifts correctly as time passes.
+    // Let's update every 10 seconds (cheap). If you want exact boundary behavior
+    // we could compute ms until next quarter and setTimeout accordingly
+    setInterval(updateBlockTable, 10 * 1000);
+
+    // Optional: update immediately when user clicks your Refresh button
+    const refreshBtn = document.getElementById('refreshBtn');
+    if (refreshBtn) {
+      refreshBtn.addEventListener('click', updateBlockTable);
+    }
+
+    // Example: if you already know GCV/cost for the next blocks, set them like:
+    // window.setBlockData(0, 5200, 2499); // block 0
+    // window.setBlockData(1, 5180, 2480); // block 1
+    // ...etc
+  })();
+</script>
+
 
 
 <!--
