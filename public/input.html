@@ -124,6 +124,34 @@
       min-width: 160px;
     }
 
+    /* ---------- Coal Flow boxes (UI only) ---------- */
+.coal-flow-wrap { margin-top:12px; padding:0 0 18px; }
+.coal-flow-title { font-weight:800; margin:6px 18px 8px; color:var(--accent); font-size:14px; }
+.coal-flow-grid { display:flex; gap:18px; align-items:stretch; padding:0 18px; box-sizing:border-box; }
+.coal-box {
+  flex:1 1 0;
+  min-width:0;
+  height:56px;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  border-radius:10px;
+  background:var(--card);
+  box-shadow:0 8px 20px rgba(2,8,23,0.06);
+  font-weight:800;
+  font-size:13px;
+}
+.coal-box .value { font-size:15px; }
+.coal-box .label { font-size:12px; color:var(--muted); font-weight:700; margin-top:4px; }
+
+/* responsive: stack vertically on narrow screens */
+@media (max-width:1100px){
+  .coal-flow-grid { flex-direction:column; padding:0 8px; }
+  .coal-box { width:100%; height:64px; }
+}
+
+
     @media (max-width:1100px){
       .layout-row{ flex-direction:column; }
       .stats-column{ width:100%; order:2; }
@@ -181,6 +209,49 @@
                   <div class="bunker" data-bunker="4"><svg viewBox="0 0 100 150" preserveAspectRatio="xMidYMid meet"></svg><div class="label">Bunker 5</div></div>
                   <div class="bunker" data-bunker="5"><svg viewBox="0 0 100 150" preserveAspectRatio="xMidYMid meet"></svg><div class="label">Bunker 6</div></div>
                 </div>
+                <!-- Coal Flow boxes (ADD BELOW .bunkers-grid) -->
+                <div class="coal-flow-wrap">
+                 <div class="coal-flow-title">Coal Flow</div>
+                 <div class="coal-flow-grid" id="coalFlowGrid">
+                  <div class="coal-box" id="coalFlowBox-0" data-bunker="0">
+                   <div class="value">--</div>
+                   <div class="label">Bunker 1</div>
+                  </div>
+                  <div class="coal-box" id="coalFlowBox-1" data-bunker="1">
+                   <div class="value">--</div>
+                   <div class="label">Bunker 2</div>
+                  </div>
+                  <div class="coal-box" id="coalFlowBox-2" data-bunker="2">
+                   <div class="value">--</div>
+                   <div class="label">Bunker 3</div>
+                  </div>
+                  <div class="coal-box" id="coalFlowBox-3" data-bunker="3">
+                   <div class="value">--</div>
+                   <div class="label">Bunker 4</div>
+                  </div>
+                  <div class="coal-box" id="coalFlowBox-4" data-bunker="4">
+                   <div class="value">--</div>
+                   <div class="label">Bunker 5</div>
+                  </div>
+                  <div class="coal-box" id="coalFlowBox-5" data-bunker="5">
+                   <div class="value">--</div>
+                   <div class="label">Bunker 6</div>
+                  </div>
+                 </div>
+                </div>
+                   <!-- End coal flow boxes -->
+                            <!-- Next Blend timers (placed below Coal Flow boxes) -->
+                <div class="coal-flow-wrap">
+                 <div class="coal-flow-title">Next Blend (timers)</div>
+                 <div class="coal-flow-grid" id="nextBlendGrid">
+                  <div class="coal-box" id="nextBlendBox-0" data-bunker="0"><div class="value">--</div><div class="label">Bunker 1</div></div>
+                  <div class="coal-box" id="nextBlendBox-1" data-bunker="1"><div class="value">--</div><div class="label">Bunker 2</div></div>
+                  <div class="coal-box" id="nextBlendBox-2" data-bunker="2"><div class="value">--</div><div class="label">Bunker 3</div></div>
+                  <div class="coal-box" id="nextBlendBox-3" data-bunker="3"><div class="value">--</div><div class="label">Bunker 4</div></div>
+                  <div class="coal-box" id="nextBlendBox-4" data-bunker="4"><div class="value">--</div><div class="label">Bunker 5</div></div>
+                  <div class="coal-box" id="nextBlendBox-5" data-bunker="5"><div class="value">--</div><div class="label">Bunker 6</div></div>
+                 </div>
+                </div>
               </div>
 
               <!-- Single bunker view (hidden initially) -->
@@ -205,7 +276,7 @@
               <div class="stat-row"><div class="stat-label">Avg AFT</div><div class="stat-value" id="AVGAFT">--</div></div>
               <div class="stat-row"><div class="stat-label">Heat Rate</div><div class="stat-value" id="HEATRATE">--</div></div>
               <div class="stat-row"><div class="stat-label">Cost (₹/MT)</div><div class="stat-value" id="COSTRATE">--</div></div>
-              <div style="opacity:0.85;font-size:11px;margin-top:6px;">(data fetched from DB)</div>
+              <div style="opacity:0.85;font-size:11px;margin-top:6px;"></div>
             </div>
           </div>
         </div>
@@ -217,5 +288,436 @@
   <div id="coalTooltip" class="coal-tooltip" aria-hidden="true"></div>
 
   <script src="/public/dashboard.js"></script>
+<script>
+/*
+  Coal Flow binder
+  - Looks for a flows array (indexes 0..5) and updates the 6 UI boxes:
+    #coalFlowBox-0 ... #coalFlowBox-5
+  - Usage:
+      // start polling every 3s (default)
+      startCoalFlowBinder();
+
+      // or start one-time read (no polling)
+      startCoalFlowBinder({once:true});
+
+      // Or push new flows instantly from other code:
+      window.dispatchEvent(new CustomEvent('flows:update', { detail: { flows: [12.3,9.1,0,4.5,16,7.2] } }));
+*/
+
+(function(){
+  const BOX_COUNT = 6;
+  const BOX_ID_PREFIX = 'coalFlowBox-';
+
+  // ---- DOM updater ----
+  function formatFlow(v){
+    if (v === null || typeof v === 'undefined' || v === '' ) return '--';
+    // if numeric-like, format to one or two decimals as needed
+    const n = Number(v);
+    if (!Number.isFinite(n)) return String(v);
+    // show integer if near integer, else one decimal (adjust as you like)
+    return Math.abs(n - Math.round(n)) < 0.005 ? String(Math.round(n)) : Number(n.toFixed(2)).toString();
+  }
+
+  function applyFlowsToUI(flows){
+    try{
+      for(let i=0;i<BOX_COUNT;i++){
+        const el = document.getElementById(BOX_ID_PREFIX + i);
+        if(!el) continue; // if your markup isn't present yet, skip
+        const valEl = el.querySelector('.value');
+        const raw = (Array.isArray(flows) && typeof flows[i] !== 'undefined') ? flows[i] : undefined;
+        if(valEl) valEl.innerText = (typeof raw === 'undefined' ? '--' : formatFlow(raw));
+      }
+    }catch(e){ console.error('applyFlowsToUI error', e); }
+  }
+
+  // ---- find flows in known globals ----
+  function findFlowsInGlobals(){
+    try{
+      // common suspects (add more if your app uses a different global)
+      const suspects = [
+        window.flows,
+        window.flowsArray,
+        window.blend && window.blend.flows,
+        window.__INITIAL_DATA__ && window.__INITIAL_DATA__.flows,
+        window.__DATA__ && window.__DATA__.flows,
+        window.dashboardData && window.dashboardData.flows,
+        window.serverData && window.serverData.flows
+      ];
+      for(const s of suspects){
+        if(Array.isArray(s)) return s;
+      }
+      // also check for object with bunkers -> flows
+      if(window.blend && Array.isArray(window.blend.bunkers)){
+        // maybe each bunker has .flow property
+        const bflows = window.blend.bunkers.map(b => (b && typeof b.flow !== 'undefined') ? b.flow : undefined);
+        if(bflows.some(x => typeof x !== 'undefined')) return bflows;
+      }
+      return null;
+    }catch(e){ console.error('findFlowsInGlobals err', e); return null; }
+  }
+
+  // ---- fetch flows from likely endpoints ----
+  async function fetchFlowsFromEndpoints(){
+    const endpoints = ['/api/flows','/api/blend','/api/data','/api/blend/latest','/api/dashboard'];
+    for(const ep of endpoints){
+      try{
+        const res = await fetch(ep, { method:'GET', credentials:'same-origin' });
+        if(!res.ok) continue;
+        const j = await res.json();
+        // search for flows in various shapes
+        if(Array.isArray(j)) {
+          // if endpoint returns raw array
+          if(j.length >= 0 && j.length <= 100 && (j.length >= 6 || j.length === 6)) return j;
+        }
+        if(Array.isArray(j.flows)) return j.flows;
+        if(Array.isArray(j.data && j.data.flows)) return j.data.flows;
+        if(Array.isArray(j.result && j.result.flows)) return j.result.flows;
+        // maybe j.rows[0].flows
+        if(Array.isArray(j.rows) && j.rows.length && Array.isArray(j.rows[0].flows)) return j.rows[0].flows;
+        // maybe j.bunkers -> map .flow
+        if(Array.isArray(j.bunkers)) {
+          const mapped = j.bunkers.map(b => (b && typeof b.flow !== 'undefined') ? b.flow : undefined);
+          if(mapped.some(x => typeof x !== 'undefined')) return mapped;
+        }
+      }catch(err){
+        // ignore fetch errors (CORS, 404 etc) and try next endpoint
+        // console.debug('fetch flows ep fail', ep, err);
+      }
+    }
+    return null;
+  }
+
+  // ---- master read function ----
+  async function readFlows(){
+    // 1) try globals
+    const g = findFlowsInGlobals();
+    if(Array.isArray(g) && g.length) return g;
+
+    // 2) try to read from a known variable inside your dashboard.js (if any)
+    // e.g., window.__blendFromServer or window.__BUNKER_DATA__ (common names)
+    const extraNames = ['__blendFromServer', '__BUNKER_DATA__', 'initialState'];
+    for(const name of extraNames){
+      try{
+        const val = window[name];
+        if(Array.isArray(val)) return val;
+        if(val && Array.isArray(val.flows)) return val.flows;
+      }catch(e){}
+    }
+
+    // 3) try fetch endpoints
+    const fetched = await fetchFlowsFromEndpoints();
+    if(Array.isArray(fetched) && fetched.length) return fetched;
+
+    // nothing found
+    return null;
+  }
+
+  // ---- public starter ----
+  let _pollTimer = null;
+  async function startCoalFlowBinder(opts = {}){
+    const { pollInterval = 3000, once = false, immediate = true } = opts;
+    if(_pollTimer) clearInterval(_pollTimer);
+    if(immediate){
+      const flows = await readFlows();
+      if(Array.isArray(flows)){
+        // ensure length at least BOX_COUNT by filling undefineds
+        const normalized = flows.slice(0, BOX_COUNT);
+        while(normalized.length < BOX_COUNT) normalized.push(undefined);
+        applyFlowsToUI(normalized);
+      }else{
+        // no flows found in any source right now
+        console.warn('CoalFlowBinder: no flows array found in globals or endpoints. UI left with -- values.');
+      }
+    }
+    if(once) return;
+
+    // start polling
+    _pollTimer = setInterval(async ()=>{
+      try{
+        const flows = await readFlows();
+        if(Array.isArray(flows)){
+          const normalized = flows.slice(0, BOX_COUNT);
+          while(normalized.length < BOX_COUNT) normalized.push(undefined);
+          applyFlowsToUI(normalized);
+        }
+      }catch(e){ console.error('poll readFlows err', e); }
+    }, Math.max(500, pollInterval));
+  }
+
+  function stopCoalFlowBinder(){
+    if(_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+  }
+
+  // ---- event-based update: other code can dispatch this to immediately update UI ----
+  window.addEventListener('flows:update', function(ev){
+    try{
+      const flows = ev && ev.detail && ev.detail.flows;
+      if(Array.isArray(flows)){
+        applyFlowsToUI(flows);
+      }else{
+        console.warn('flows:update event missing detail.flows array');
+      }
+    }catch(e){ console.error('flows:update handler err', e); }
+  }, false);
+
+  // Expose functions to window
+  window.applyFlowsToUI = applyFlowsToUI;
+  window.readFlows = readFlows;
+  window.startCoalFlowBinder = startCoalFlowBinder;
+  window.stopCoalFlowBinder = stopCoalFlowBinder;
+
+  // Auto-start by default: attempt immediate bind + polling every 3s.
+  // If you don't want auto start, comment the line below.
+  startCoalFlowBinder(); // default: poll every 3s
+
+})();
+</script>
+<script>
+/* NextBlendBinder
+   - Builds per-bunker sequences from window.LATEST_BLEND.rows (percentages per row)
+   - Uses blend.bunkerCapacity and blend.flows (or other flow sources)
+   - For bunker i: time = (percent/100 * bunkerCapacity) / flow_i  (hours) -> converted to seconds
+   - Each bunker runs its own sequential timers (independent)
+*/
+(function(){
+  const BUNKER_COUNT = 6;
+  const BOX_PREFIX = 'nextBlendBox-';
+  const POLL_RECOMPUTE_MS = 6000; // re-read blend & flows periodically
+  const TICK_MS = 1000; // 1s tick for countdown
+
+  // state per bunker
+  const state = Array.from({length: BUNKER_COUNT}, () => ({
+    sequence: [],      // durations in seconds
+    idx: 0,            // current index in sequence
+    remaining: null,   // remaining seconds for current item, null = idle/unavailable
+    lastSeqHash: null  // to detect changes
+  }));
+
+  // basic time formatter
+  function formatHMS(seconds){
+    if(seconds === null || typeof seconds === 'undefined' || !Number.isFinite(seconds)) return '--';
+    if(seconds <= 0) return '00:00:00';
+    seconds = Math.max(0, Math.floor(seconds));
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  }
+
+  // sanitize numeric-like values (handles mongodb wrappers)
+  function extractNumber(v){
+    if(v === null || typeof v === 'undefined') return null;
+    if(typeof v === 'number') return v;
+    if(typeof v === 'string' && v.trim() !== '') {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    }
+    if(typeof v === 'object'){
+      // try MongoDB style { $numberInt: "10" } or { $numberDouble: "10.5" }
+      if(v.$numberInt) return Number(v.$numberInt);
+      if(v.$numberDouble) return Number(v.$numberDouble);
+      if(v.$date) return Number(v.$date);
+      // fallback to converting JSON string
+      try{ const s = JSON.stringify(v); const n = Number(s.replace(/[^\d\.\-]/g,'')); return Number.isFinite(n) ? n : null; }catch(e){}
+    }
+    return null;
+  }
+
+  // compute sequences (durations in seconds) for all bunkers based on blend and flows
+  function buildSequencesFromBlend(blend, flows){
+    const capacity = (blend && blend.bunkerCapacity) ? extractNumber(blend.bunkerCapacity) : null;
+    const seqs = Array.from({length: BUNKER_COUNT}, () => []);
+    // choose flows array preference: blend.flows, window.flows, passed flows arg etc
+    const flowArr = Array.isArray(flows) ? flows : (Array.isArray(blend && blend.flows) ? blend.flows : (Array.isArray(window.flows) ? window.flows : []));
+    for(let b=0;b<BUNKER_COUNT;b++){
+      const fVal = extractNumber(flowArr[b]);
+      // iterate rows from bottom -> top (reverse) so bottom coal is considered first
+      if(!Array.isArray(blend.rows)) { seqs[b] = []; continue; }
+      for(let r = blend.rows.length - 1; r >= 0; r--){
+        const row = blend.rows[r];
+        // prefer row.percentages as array
+        let p = null;
+        if(Array.isArray(row.percentages) && row.percentages.length > b){
+          p = extractNumber(row.percentages[b]);
+        } else if(typeof row.percent === 'number' && b === 0) {
+          // fallback if row.percent used for single bunker case
+          p = row.percent;
+        } else if(row.percent) {
+          p = extractNumber(row.percent);
+        }
+        if(p === null || p === 0) continue; // skip zero/no-percent entries
+        // require both capacity and flow to compute a duration
+        if(!capacity || !fVal || fVal <= 0) {
+          seqs[b].push(null); // mark as unavailable due to missing flow/capacity
+        } else {
+          const percentDecimal = Number(p) / 100.0;
+          const hours = (percentDecimal * Number(capacity)) / Number(fVal); // hours
+          const seconds = Math.max(0, hours * 3600);
+          seqs[b].push(seconds);
+        }
+      }
+    }
+    return seqs;
+  }
+
+  // update UI for bunker boxes
+  function updateNextBlendUI(){
+    for(let i=0;i<BUNKER_COUNT;i++){
+      const el = document.getElementById(BOX_PREFIX + i);
+      if(!el) continue;
+      const valEl = el.querySelector('.value');
+      const st = state[i];
+      if(!st || st.remaining === null || st.remaining === undefined){
+        valEl.innerText = '--';
+      } else if(st.remaining === 0 && (st.idx >= (st.sequence ? st.sequence.length : 0))){
+        valEl.innerText = 'Done';
+      } else {
+        valEl.innerText = formatHMS(st.remaining);
+      }
+    }
+  }
+
+  // helper to compute a simple hash for a sequence array (to detect changes)
+  function seqHash(seq){
+    if(!Array.isArray(seq)) return '';
+    return seq.map(x => (x === null ? 'X' : Math.round(x))).join(',');
+  }
+
+  // attempt to keep current index if sequence changed slightly; otherwise reset to 0
+  function reconcileStateWithNewSeq(b, newSeq){
+    const st = state[b];
+    const newHash = seqHash(newSeq);
+    // if sequences identical, keep as is
+    if(newHash === st.lastSeqHash) return;
+    // if previous index still valid (e.g., lengths match or longer), keep the remaining for current index
+    if(Array.isArray(newSeq) && newSeq.length > 0){
+      // if previous idx is within newSeq length and remaining less or equal newSeq[idx], keep remaining
+      if(st.idx < newSeq.length && st.remaining !== null && st.remaining !== undefined && newSeq[st.idx] !== null){
+        // clamp remaining to newSeq[st.idx]
+        st.remaining = Math.min(Math.ceil(newSeq[st.idx]), Math.max(0, Math.floor(st.remaining)));
+        st.sequence = newSeq.slice();
+      } else {
+        // reset to first available item
+        st.sequence = newSeq.slice();
+        st.idx = 0;
+        st.remaining = (st.sequence[0] === null || typeof st.sequence[0] === 'undefined') ? null : Math.ceil(st.sequence[0]);
+      }
+    } else {
+      // no sequence
+      st.sequence = [];
+      st.idx = 0;
+      st.remaining = null;
+    }
+    st.lastSeqHash = newHash;
+  }
+
+  // recompute sequences periodically
+  function recomputeFromLatest(){
+    const blend = window.LATEST_BLEND || null;
+    // flows can be from blend.flows or window.flows etc - try to use binder flows first if present
+    const flowsCandidates = (Array.isArray(window.__flowsFromBinder) ? window.__flowsFromBinder : null);
+    // prefer blend.flows then window.flows then binder candidate
+    const flows = Array.isArray(blend && blend.flows) ? blend.flows : (Array.isArray(window.flows) ? window.flows : flowsCandidates);
+    const newSeqs = buildSequencesFromBlend(blend || {}, flows || []);
+    for(let b=0;b<BUNKER_COUNT;b++){
+      reconcileStateWithNewSeq(b, newSeqs[b] || []);
+    }
+    updateNextBlendUI();
+  }
+
+  // 1s tick to decrease remaining for each bunker
+  let _tickTimer = null;
+  function tick(){
+    for(let b=0;b<BUNKER_COUNT;b++){
+      const st = state[b];
+      if(!st.sequence || st.sequence.length === 0) { st.remaining = null; continue; }
+      // if current sequence item is unavailable (null) then mark remaining null
+      if(st.sequence[st.idx] === null){
+        st.remaining = null;
+        continue;
+      }
+      if(typeof st.remaining !== 'number' || st.remaining <= 0){
+        // start / move to next
+        if(st.idx < st.sequence.length){
+          // set remaining to ceil of sequence entry (if it's a number)
+          if(st.sequence[st.idx] === null || typeof st.sequence[st.idx] === 'undefined'){
+            st.remaining = null;
+          } else {
+            st.remaining = Math.max(0, Math.ceil(st.sequence[st.idx]));
+          }
+        } else {
+          st.remaining = 0;
+        }
+      } else {
+        // decrement
+        st.remaining = Math.max(0, st.remaining - 1);
+        // if reached zero exactly, step to next item on next tick
+        if(st.remaining === 0){
+          st.idx++;
+          if(st.idx < st.sequence.length && st.sequence[st.idx] !== null){
+            st.remaining = Math.max(0, Math.ceil(st.sequence[st.idx]));
+          } else {
+            // either sequence finished or next item unavailable
+            if(st.idx >= st.sequence.length) {
+              st.remaining = 0;
+            } else {
+              st.remaining = null;
+            }
+          }
+        }
+      }
+    }
+    updateNextBlendUI();
+  }
+
+  // external helper: allow other code to push flows to binder (coal flow binder emits event flows:update)
+  function handleFlowsUpdate(ev){
+    try{
+      const f = ev && ev.detail && ev.detail.flows;
+      if(Array.isArray(f)){
+        // store a copy so recompute can pick it up
+        window.__flowsFromBinder = f.slice(0);
+        recomputeFromLatest();
+      }
+    }catch(e){}
+  }
+
+  // auto-listen to flows:update event (coal flow binder uses this)
+  window.addEventListener('flows:update', handleFlowsUpdate, false);
+
+  // public controls
+  function startNextBlendBinder(){
+    if(_tickTimer) return; // already started
+    // initial compute
+    recomputeFromLatest();
+    _tickTimer = setInterval(tick, TICK_MS);
+    // recompute sequences at intervals (to pick up new blend data & changed flows)
+    window.__nextBlend_recompute_timer = setInterval(recomputeFromLatest, POLL_RECOMPUTE_MS);
+    // also run an immediate recompute every time LATEST_BLEND is updated by your code (not strictly necessary)
+    // no direct hook available - recompute on interval suffices
+  }
+  function stopNextBlendBinder(){
+    if(_tickTimer) { clearInterval(_tickTimer); _tickTimer = null; }
+    if(window.__nextBlend_recompute_timer){ clearInterval(window.__nextBlend_recompute_timer); window.__nextBlend_recompute_timer = null; }
+  }
+
+  // Expose for debugging/control
+  window.nextBlendBinder = {
+    start: startNextBlendBinder,
+    stop: stopNextBlendBinder,
+    recompute: recomputeFromLatest,
+    state
+  };
+
+  // auto-start
+  document.addEventListener('DOMContentLoaded', () => {
+    // small delay so your refreshAndRender may populate window.LATEST_BLEND and flows
+    setTimeout(() => { startNextBlendBinder(); }, 800);
+  });
+
+})();
+</script>
+
+
 </body>
 </html>
