@@ -145,6 +145,10 @@
 .coal-box .value { font-size:15px; }
 .coal-box .label { font-size:12px; color:var(--muted); font-weight:700; margin-top:4px; }
 
+  /* dims inactive layers and highlights the active (utilising) layer */
+  /* .bunker-util .util-inactive { opacity: 0.25; transition: opacity 300ms ease; }
+  .bunker-util .util-active   { opacity: 1 !important; transition: opacity 300ms ease; filter: drop-shadow(0 1px 4px rgba(0,0,0,0.25)); } */
+
 /* responsive: stack vertically on narrow screens */
 @media (max-width:1100px){
   .coal-flow-grid { flex-direction:column; padding:0 8px; }
@@ -252,6 +256,17 @@
                   <div class="coal-box" id="nextBlendBox-5" data-bunker="5"><div class="value">--</div><div class="label">Bunker 6</div></div>
                  </div>
                 </div>
+                <div class="coal-flow-wrap">
+                 <div class="coal-flow-title">Estimated Generation (MW)</div>
+                 <div class="coal-flow-grid" id="estGenGrid">
+                  <div class="coal-box" id="estGenBox-0" data-bunker="0"><div class="value">--</div><div class="label">Bunker 1</div></div>
+                  <div class="coal-box" id="estGenBox-1" data-bunker="1"><div class="value">--</div><div class="label">Bunker 2</div></div>
+                  <div class="coal-box" id="estGenBox-2" data-bunker="2"><div class="value">--</div><div class="label">Bunker 3</div></div>
+                  <div class="coal-box" id="estGenBox-3" data-bunker="3"><div class="value">--</div><div class="label">Bunker 4</div></div>
+                  <div class="coal-box" id="estGenBox-4" data-bunker="4"><div class="value">--</div><div class="label">Bunker 5</div></div>
+                  <div class="coal-box" id="estGenBox-5" data-bunker="5"><div class="value">--</div><div class="label">Bunker 6</div></div>
+                  </div>
+                </div>
               </div>
 
               <!-- Single bunker view (hidden initially) -->
@@ -358,7 +373,7 @@
 
   // ---- fetch flows from likely endpoints ----
   async function fetchFlowsFromEndpoints(){
-    const endpoints = ['/api/flows','/api/blend','/api/data','/api/blend/latest','/api/dashboard'];
+    const endpoints = ['/api/blend/latest','/api/dashboard'];
     for(const ep of endpoints){
       try{
         const res = await fetch(ep, { method:'GET', credentials:'same-origin' });
@@ -717,6 +732,1276 @@
 
 })();
 </script>
+<script>
+/* Robust estimatedGenerationBinder with multi-strategy bottom-coal detection + debug table
+   MW = (flow_for_bunker) * (gcv_of_bottom_coal) / heatRate
+*/
+(function(){
+  const BUNKER_COUNT = 6;
+  const BOX_PREFIX = 'estGenBox-';
+  const UPDATE_MS = 1000;
+
+  function extractNumber(v){
+    if(v === null || typeof v === 'undefined') return null;
+    if(typeof v === 'number') return v;
+    if(typeof v === 'string' && v.trim() !== ''){
+      const n = Number(String(v).replace(/,/g,''));
+      return Number.isFinite(n) ? n : null;
+    }
+    if(typeof v === 'object'){
+      if(v.$numberInt) return Number(v.$numberInt);
+      if(v.$numberDouble) return Number(v.$numberDouble);
+      if(v.$numberLong) return Number(v.$numberLong);
+      if(v.$date) return Number(v.$date);
+      try{
+        const s = JSON.stringify(v);
+        const m = s.match(/-?\d+(\.\d+)?/);
+        if(m) {
+          const n = Number(m[0]);
+          return Number.isFinite(n) ? n : null;
+        }
+      }catch(e){}
+    }
+    return null;
+  }
+
+  function getFlows(blend){
+    if(Array.isArray(blend && blend.flows)) return blend.flows;
+    if(Array.isArray(window.flows)) return window.flows;
+    if(Array.isArray(window.__flowsFromBinder)) return window.__flowsFromBinder;
+    return [];
+  }
+
+  // bottom->top list of row indexes that have non-zero percent for a bunker
+  function buildRowIndexSeqForBunker(blend, bunkerIndex){
+    const seq = [];
+    if(!blend || !Array.isArray(blend.rows)) return seq;
+    for(let r = blend.rows.length - 1; r >= 0; r--){
+      const row = blend.rows[r];
+      let p = null;
+      if(Array.isArray(row.percentages) && row.percentages.length > bunkerIndex){
+        p = extractNumber(row.percentages[bunkerIndex]);
+      } else if(typeof row.percent === 'number' && bunkerIndex === 0){
+        p = extractNumber(row.percent);
+      } else if(row.percent){
+        p = extractNumber(row.percent);
+      }
+      if(p !== null && p !== 0) seq.push(r);
+    }
+    return seq;
+  }
+
+  // try to read HEATRATE from DOM id first, else from blend.heatRate
+  function readHeatRate(blend){
+    const el = (typeof document !== 'undefined' && document.getElementById) ? document.getElementById('HEATRATE') : null;
+    if(el){
+      const txt = (el.value !== undefined && el.value !== null) ? el.value : (el.textContent || el.innerText || '');
+      const nn = extractNumber(txt);
+      if(nn !== null) return nn;
+    }
+    return extractNumber(blend && blend.heatRate);
+  }
+
+  // helper: try to read rowIndex from blend.bunkers[b].layers bottom layer (if present)
+  function getRowIndexFromBunkerLayers(blend, bunkerIndex){
+    try{
+      if(!blend || !Array.isArray(blend.bunkers)) return null;
+      const b = blend.bunkers[bunkerIndex];
+      if(!b || !Array.isArray(b.layers) || b.layers.length === 0) return null;
+      // I assume layers are ordered bottom->top — if wrong, we'll detect it in debug
+      const layer = b.layers[0]; // bottom-most layer
+      if(layer && (layer.rowIndex !== undefined || layer.rowIndex !== null)) return layer.rowIndex;
+      // there might be 'row' or '_id' mapping – attempt common keys
+      if(layer && layer.row !== undefined) return layer.row;
+    }catch(e){}
+    return null;
+  }
+
+  // main tick
+  function updateOnce(){
+    const blend = window.LATEST_BLEND || {};
+    const flows = getFlows(blend);
+    const heatRate = readHeatRate(blend);
+
+    const debugRows = [];
+
+    for(let b = 0; b < BUNKER_COUNT; b++){
+      const box = document.getElementById(BOX_PREFIX + b);
+      const valEl = box ? box.querySelector('.value') : null;
+
+      const rawFlow = Array.isArray(flows) ? flows[b] : null;
+      const flowVal = extractNumber(rawFlow);
+
+      // strategy 1: map nextBlendBinder.state[b].idx -> rowIndex using same bottom->top sequence
+      let chosenRowIndex = null;
+      let chosenBy = null;
+
+      const seq = buildRowIndexSeqForBunker(blend, b); // bottom->top row indexes
+
+      if(window.nextBlendBinder && Array.isArray(window.nextBlendBinder.state)){
+        const st = window.nextBlendBinder.state[b];
+        if(st && Array.isArray(st.sequence)){
+          const idx = (typeof st.idx === 'number') ? st.idx : 0;
+          if(Array.isArray(seq) && seq.length > 0){
+            const safeIdx = Math.min(Math.max(0, idx), seq.length - 1);
+            chosenRowIndex = seq[safeIdx];
+            chosenBy = 'nextBlendBinder';
+          }
+        }
+      }
+
+      // strategy 2: use blend.bunkers[b].layers bottom-most (if present)
+      if(chosenRowIndex === null){
+        const rFromLayers = getRowIndexFromBunkerLayers(blend, b);
+        if(rFromLayers !== null && rFromLayers !== undefined) {
+          chosenRowIndex = rFromLayers;
+          chosenBy = 'bunkerLayers';
+        }
+      }
+
+      // strategy 3: deterministic bottom-most non-zero percent row
+      if(chosenRowIndex === null){
+        if(Array.isArray(seq) && seq.length > 0){
+          chosenRowIndex = seq[0];
+          chosenBy = 'bottomScan';
+        }
+      }
+
+      // get gcv
+      const gcv = (chosenRowIndex !== null && Array.isArray(blend.rows) && blend.rows[chosenRowIndex]) ?
+                  extractNumber(blend.rows[chosenRowIndex].gcv) : null;
+
+      let computedMw = null;
+      if(flowVal !== null && flowVal > 0 && gcv !== null && typeof heatRate === 'number' && heatRate > 0){
+        computedMw = (Number(flowVal) * Number(gcv)) / Number(heatRate);
+      }
+
+      // update UI
+      if(valEl){
+        valEl.innerText = (computedMw === null) ? '--' : (Number.isFinite(computedMw) ? computedMw.toFixed(2) : '--');
+      }
+
+      debugRows.push({
+        bunker: b,
+        rawFlow,
+        flowVal,
+        heatRate,
+        seq_rowIndexes: seq,
+        chosenBy,
+        chosenRowIndex,
+        gcv,
+        computedMw
+      });
+    }
+
+    // compact debug table (one-per-second) — inspect in console to see mismatches
+    if(console && console.table){
+      // show only key fields
+      console.log('EstimatedGen — debug');
+      console.table(debugRows.map(r => ({
+        bunker: r.bunker,
+        flowVal: r.flowVal,
+        heatRate: r.heatRate,
+        seq_rowIndexes: JSON.stringify(r.seq_rowIndexes),
+        chosenBy: r.chosenBy,
+        chosenRowIndex: r.chosenRowIndex,
+        gcv: r.gcv,
+        computedMw: (r.computedMw === null ? '--' : Number.isFinite(r.computedMw) ? r.computedMw.toFixed(2) : '--')
+      })));
+    }
+  }
+
+  // lifecycle
+  let __timer = null;
+  function start(){
+    if(__timer) return;
+    updateOnce();
+    __timer = setInterval(updateOnce, UPDATE_MS);
+    window.addEventListener('flows:update', updateOnce);
+    window.addEventListener('blend:updated', updateOnce);
+  }
+  function stop(){
+    if(__timer){ clearInterval(__timer); __timer = null; }
+    window.removeEventListener('flows:update', updateOnce);
+    window.removeEventListener('blend:updated', updateOnce);
+  }
+
+  window.estimatedGenerationBinder = { start, stop, update: updateOnce };
+
+  document.addEventListener('DOMContentLoaded', () => setTimeout(start, 600));
+})();
+</script>
+
+
+<!--
+Live "draining" visual for bunker layers based on NextBlendBinder timers.
+- Smoothly reduces the visible height of the active (bottom) layer as its timer counts down.
+- Works with your existing bunker SVGs (they must include rects with data-row and data-mill attributes,
+  which your renderBunkerIntoSVG already produces).
+- Uses nextBlendBinder.state when available (preferred). Falls back to computing per-layer seconds.
+- Adds a small CSS transition so the layer looks like it's "going down" smoothly.
+Paste this after your NextBlendBinder & dashboard.js (or anywhere after the bunker SVGs exist).
+-->
+<style>
+  /* smooth SVG rect height/y changes */
+  svg rect {
+    transition: height 1s linear, y 1s linear, opacity 400ms ease;
+  }
+  /* optional highlight for the active layer */
+  svg rect.util-active {
+    filter: drop-shadow(0 2px 6px rgba(0,0,0,0.25));
+    opacity: 1 !important;
+  }
+  svg rect.util-inactive {
+    opacity: 0.35;
+  }
+</style>
+
+<!--
+Animated bunker drain that strictly follows your existing per-bunker timers (bunkerTimers).
+If your page uses the older bunkerTimers (the timer-setInterval approach in your long script) this
+visualizer will *use it* and animate continuously (sub-second) so a 10s layer drains exactly in 10s.
+If bunkerTimers isn't present, it will fall back to window.nextBlendBinder state (with elapsed-time
+estimates) and finally to computeLayerSeconds() fallback.
+
+Paste this AFTER your existing scripts (the one that defines bunkerTimers/startOrUpdateBunkerTimer etc.)
+-->
+<!-- <script>
+(function(){
+  const BUNKER_COUNT = 6;
+  const usableTopY = 10, usableBottomY = 140;
+  const usableH = usableBottomY - usableTopY;
+  const FRAME_RESYNC_MS = 1000;
+
+  // safe number extractor (mongo wrappers + strings)
+  function extractNumber(v){
+    if(v === null || typeof v === 'undefined') return null;
+    if(typeof v === 'number') return v;
+    if(typeof v === 'string' && v.trim() !== '') {
+      const n = Number(String(v).replace(/,/g,''));
+      return Number.isFinite(n) ? n : null;
+    }
+    if(typeof v === 'object'){
+      if(v.$numberInt) return Number(v.$numberInt);
+      if(v.$numberDouble) return Number(v.$numberDouble);
+      if(v.$numberLong) return Number(v.$numberLong);
+      if(v.$date) return Number(v.$date);
+      try{
+        const s = JSON.stringify(v);
+        const m = s.match(/-?\d+(\.\d+)?/);
+        if(m) return Number(m[0]);
+      }catch(e){}
+    }
+    return null;
+  }
+
+  // Build bottom->top list of blend.row indexes that have a non-zero percent for this bunker
+  function buildRowIndexSeqForBunker(blend, bunkerIndex){
+    const seq = [];
+    if(!blend || !Array.isArray(blend.rows)) return seq;
+    for(let r = blend.rows.length - 1; r >= 0; r--){
+      const row = blend.rows[r];
+      let p = null;
+      if(Array.isArray(row.percentages) && row.percentages.length > bunkerIndex){
+        p = extractNumber(row.percentages[bunkerIndex]);
+      } else if(typeof row.percent === 'number' && bunkerIndex === 0){
+        p = extractNumber(row.percent);
+      } else if(row.percent){
+        p = extractNumber(row.percent);
+      }
+      if(p !== null && p > 0) seq.push(r);
+    }
+    return seq;
+  }
+
+  // compute fallback layer seconds from blend (replicates your computeLayerSeconds logic)
+  function computeLayerSecondsFromBlend(blend, bunkerIndex){
+    const bunkerCapacity = extractNumber(blend && blend.bunkerCapacity) || (parseFloat(document.getElementById('bunkerCapacity')?.value) || 0);
+    const flows = Array.isArray(blend && blend.flows) ? blend.flows : (Array.isArray(window.__flowsFromBinder) ? window.__flowsFromBinder : (Array.isArray(window.flows) ? window.flows : []));
+    const flow = extractNumber(Array.isArray(flows) ? flows[bunkerIndex] : null) || (parseFloat(document.querySelector(`.flow-input[data-mill="${bunkerIndex}"]`)?.value) || 0);
+    const seqRowIndexes = buildRowIndexSeqForBunker(blend, bunkerIndex);
+    const seconds = seqRowIndexes.map(r => {
+      const row = blend.rows && blend.rows[r] ? blend.rows[r] : null;
+      let p = null;
+      if(row){
+        if(Array.isArray(row.percentages) && row.percentages.length > bunkerIndex) p = extractNumber(row.percentages[bunkerIndex]);
+        else if(typeof row.percent === 'number' && bunkerIndex === 0) p = extractNumber(row.percent);
+        else if(row.percent) p = extractNumber(row.percent);
+      }
+      if(!bunkerCapacity || !flow || flow <= 0 || p === null || p <= 0) return 0;
+      const hours = (Number(p) / 100.0) * Number(bunkerCapacity) / Number(flow);
+      return hours * 3600;
+    });
+    return seconds;
+  }
+
+  // Map rowIndex -> rect element for a bunker (created by updateBunkerColors/renderBunkerIntoSVG)
+  function mapRectElementsForBunker(bIndex){
+    const rects = Array.from(document.querySelectorAll(`svg rect[data-mill="${bIndex}"]`));
+    const map = new Map();
+    rects.forEach(r => {
+      const ra = r.getAttribute('data-row');
+      if(ra === null || ra === '') return;
+      const ri = isNaN(Number(ra)) ? ra : Number(ra);
+      // preserve original full height if present
+      if(!r.hasAttribute('data-fullheight')){
+        const h = parseFloat(r.getAttribute('height')) || 0;
+        r.setAttribute('data-fullheight', String(h));
+      }
+      map.set(Number(ri), r);
+    });
+    // fallback: if map empty but rects exist, map by order as best-effort
+    if(map.size === 0 && rects.length > 0){
+      rects.forEach((r, i) => map.set(i, r));
+    }
+    return map;
+  }
+
+  // Local cache used to compute continuous remaining from integer-second timers
+  const local = Array.from({length: BUNKER_COUNT}, () => ({
+    seqRowIndexes: [],    // bottom->top blend rows index list
+    seqSeconds: [],       // seconds per layer (from bunkerTimers or binder or computed)
+    rectMap: new Map(),   // rowIndex -> rect element
+    fullHeights: [],      // px full heights per layer (bottom->top)
+    // authoritative reference (from bunkerTimers or nextBlendBinder)
+    ref: null,            // { idx, remaining, total } last seen
+    refTs: 0,             // timestamp ms when ref was recorded
+    // current display index (which layer is actively draining)
+    displayIdx: 0
+  }));
+
+  // sync structural metadata (rect mapping + sequence rows + heights)
+  function resyncMetadata(){
+    const blend = window.LATEST_BLEND || {};
+    for(let b=0;b<BUNKER_COUNT;b++){
+      const seq = buildRowIndexSeqForBunker(blend, b);
+      local[b].seqRowIndexes = seq.slice();
+      local[b].rectMap = mapRectElementsForBunker(b);
+      local[b].fullHeights = seq.map(r => {
+        const row = blend.rows && blend.rows[r] ? blend.rows[r] : null;
+        let p = null;
+        if(row){
+          if(Array.isArray(row.percentages) && row.percentages.length > b) p = extractNumber(row.percentages[b]);
+          else if(typeof row.percent === 'number' && b === 0) p = extractNumber(row.percent);
+          else if(row.percent) p = extractNumber(row.percent);
+        }
+        return p ? (Math.max(0, Math.min(100, Number(p))) / 100) * usableH : 0;
+      });
+      // ensure displayIdx bounded
+      local[b].displayIdx = Math.max(0, Math.min(local[b].displayIdx || 0, Math.max(0, local[b].seqSeconds.length - 1)));
+    }
+  }
+
+  // Prefer authoritative timers:
+  // 1) if your legacy bunkerTimers[] exists and has layersSeconds + layerRemaining -> use it
+  // 2) else if window.nextBlendBinder.state present -> use it
+  // 3) else fallback to computeLayerSecondsFromBlend()
+  function refreshRefsFromSources(){
+    const blend = window.LATEST_BLEND || {};
+    for(let b=0;b<BUNKER_COUNT;b++){
+      // 1) legacy bunkerTimers
+      if(Array.isArray(window.bunkerTimers) || (window.bunkerTimers && typeof window.bunkerTimers === 'object')){
+        const t = window.bunkerTimers && window.bunkerTimers[b];
+        if(t && Array.isArray(t.layersSeconds) && t.layersSeconds.length){
+          // make a defensive copy of seconds
+          local[b].seqSeconds = t.layersSeconds.map(s => Number(s) || 0);
+          // record authoritative ref (remaining/total/idx)
+          local[b].ref = {
+            idx: Number(t.currentLayer || 0),
+            remaining: Number(t.layerRemaining || 0),
+            total: Number(t.layersSeconds[t.currentLayer] || 0)
+          };
+          local[b].refTs = Date.now();
+          local[b].displayIdx = local[b].ref.idx;
+          continue;
+        }
+      }
+
+      // 2) nextBlendBinder
+      try {
+        const ns = window.nextBlendBinder && Array.isArray(window.nextBlendBinder.state) ? window.nextBlendBinder.state[b] : null;
+        if(ns && Array.isArray(ns.sequence) && ns.sequence.length){
+          local[b].seqSeconds = ns.sequence.map(s => Number(s) || 0);
+          local[b].ref = {
+            idx: Number(ns.idx || 0),
+            remaining: Number(ns.remaining || (ns.sequence[ns.idx] || 0)),
+            total: Number(ns.sequence[ns.idx] || 0)
+          };
+          local[b].refTs = Date.now();
+          local[b].displayIdx = local[b].ref.idx;
+          continue;
+        }
+      } catch(e){ /* ignore */ }
+
+      // 3) fallback compute from blend
+      local[b].seqSeconds = computeLayerSecondsFromBlend(blend, b).map(s => Number(s) || 0);
+      if(local[b].seqSeconds && local[b].seqSeconds.length){
+        local[b].ref = { idx: 0, remaining: local[b].seqSeconds[0], total: local[b].seqSeconds[0] };
+        local[b].refTs = Date.now();
+        local[b].displayIdx = 0;
+      } else {
+        local[b].ref = null;
+        local[b].refTs = 0;
+        local[b].displayIdx = 0;
+      }
+    }
+  }
+
+  // Estimate continuous remaining seconds using last seen ref + elapsed time
+  function estimateRemaining(b){
+    const ref = local[b].ref;
+    if(!ref || typeof ref.remaining !== 'number') return null;
+    const elapsed = (Date.now() - local[b].refTs) / 1000.0;
+    const est = Math.max(0, ref.remaining - elapsed);
+    return est;
+  }
+
+  // If estimated remaining reaches zero, advance to next layer locally (so UI reveals next layer smoothly)
+  function advanceIfFinished(b, estRemaining){
+    let didAdvance = false;
+    while(estRemaining !== null && estRemaining <= 0){
+      const next = local[b].displayIdx + 1;
+      if(!Array.isArray(local[b].seqSeconds) || next >= local[b].seqSeconds.length){
+        // finished all layers, keep at last index (or set to length-1)
+        local[b].displayIdx = Math.min(local[b].displayIdx, Math.max(0, (local[b].seqSeconds.length - 1)));
+        break;
+      }
+      local[b].displayIdx = next;
+      // update ref to new layer total (we don't know binder remaining for next until source updates)
+      const newTotal = local[b].seqSeconds[next] || 0;
+      local[b].ref = { idx: next, remaining: newTotal, total: newTotal };
+      local[b].refTs = Date.now();
+      estRemaining = newTotal;
+      didAdvance = true;
+    }
+    return didAdvance;
+  }
+
+  // Apply computed visible heights to rect elements for a bunker (bottom->top)
+  function applyHeightsToRects(b, visibleHeightsArr){
+    // visibleHeightsArr is bottom->top px array
+    let cum = 0;
+    const seqRowIndexes = local[b].seqRowIndexes || [];
+    for(let i = 0; i < seqRowIndexes.length; i++){
+      const rowIndex = seqRowIndexes[i];
+      const rect = local[b].rectMap ? local[b].rectMap.get(Number(rowIndex)) : null;
+      const visibleH = Math.max(0, Number(visibleHeightsArr[i] || 0));
+      const y = usableBottomY - (cum + visibleH);
+      if(rect){
+        rect.setAttribute('height', String(visibleH));
+        rect.setAttribute('y', String(y));
+        if(i === local[b].displayIdx){
+          rect.classList.add('util-active'); rect.classList.remove('util-inactive');
+        } else {
+          rect.classList.remove('util-active'); rect.classList.add('util-inactive');
+        }
+      }
+      cum += visibleH;
+    }
+
+    // hide any rects not in seqRowIndexes
+    if(local[b].rectMap){
+      local[b].rectMap.forEach((rect, rIndex) => {
+        if(seqRowIndexes.indexOf(Number(rIndex)) === -1){
+          rect.setAttribute('height', '0');
+          rect.setAttribute('y', String(usableBottomY));
+          rect.classList.remove('util-active');
+          rect.classList.add('util-inactive');
+        }
+      });
+    }
+  }
+
+  // Main RAF loop: compute visible heights from authoritative timers and update rects.
+  let rafId = null;
+  function frame(){
+    // Refresh compact refs from sources at start of frame (so we always use latest data)
+    refreshRefsFromSources();
+
+    for(let b=0;b<BUNKER_COUNT;b++){
+      // ensure seqRowIndexes & rectMap exist (resync if empty)
+      if(!Array.isArray(local[b].seqRowIndexes) || !local[b].seqRowIndexes.length || !local[b].rectMap || local[b].rectMap.size===0){
+        resyncMetadata();
+        // ensure seqSeconds also set
+        if(!local[b].seqSeconds || !local[b].seqSeconds.length) refreshRefsFromSources();
+      }
+
+      // Estimate remaining and advance if needed
+      let estRemaining = estimateRemaining(b);
+      if(estRemaining === null && Array.isArray(local[b].seqSeconds) && local[b].seqSeconds.length){
+        // fallback: treat as full
+        estRemaining = local[b].seqSeconds[local[b].displayIdx] || 0;
+        local[b].ref = { idx: local[b].displayIdx, remaining: estRemaining, total: local[b].seqSeconds[local[b].displayIdx] || estRemaining };
+        local[b].refTs = Date.now();
+      }
+
+      // advance layers locally when finished
+      advanceIfFinished(b, estRemaining);
+
+      // Recompute estRemaining after any advancement
+      estRemaining = estimateRemaining(b);
+
+      // Build visible heights bottom->top
+      const visibleHeights = [];
+      const seqSeconds = local[b].seqSeconds || [];
+      for(let i=0;i<local[b].seqRowIndexes.length;i++){
+        const fullH = local[b].fullHeights && typeof local[b].fullHeights[i] === 'number' ? local[b].fullHeights[i] : (local[b].rectMap && local[b].rectMap.get(local[b].seqRowIndexes[i]) ? Number(local[b].rectMap.get(local[b].seqRowIndexes[i]).getAttribute('data-fullheight') || 0) : 0);
+        let vh = fullH;
+        if(i < local[b].displayIdx){
+          vh = 0;
+        } else if(i === local[b].displayIdx){
+          const totalForLayer = (Array.isArray(seqSeconds) && seqSeconds.length > i) ? Number(seqSeconds[i]) : (local[b].ref ? Number(local[b].ref.total || 0) : 0);
+          if(totalForLayer && totalForLayer > 0 && typeof estRemaining === 'number'){
+            const frac = Math.max(0, Math.min(1, estRemaining / totalForLayer));
+            vh = fullH * frac;
+          } else if(totalForLayer === 0){
+            vh = 0;
+          } else {
+            vh = fullH;
+          }
+        } else {
+          vh = fullH;
+        }
+        visibleHeights.push(vh);
+      }
+
+      applyHeightsToRects(b, visibleHeights);
+    }
+
+    rafId = requestAnimationFrame(frame);
+  }
+
+  // start/stop & periodic resync
+  let resyncTimer = null;
+  function start(){
+    // initial structural sync
+    resyncMetadata();
+    refreshRefsFromSources();
+    if(rafId == null) rafId = requestAnimationFrame(frame);
+    if(resyncTimer == null) resyncTimer = setInterval(() => {
+      resyncMetadata();
+      refreshRefsFromSources();
+    }, FRAME_RESYNC_MS);
+
+    // also listen to events your app uses to update blend/flows
+    window.addEventListener('flows:update', () => { resyncMetadata(); refreshRefsFromSources(); });
+    window.addEventListener('blend:updated', () => { resyncMetadata(); refreshRefsFromSources(); });
+    // If your legacy code dispatches any custom event when bunkerTimers change, also listen to it:
+    window.addEventListener('bunkertimers:updated', () => { resyncMetadata(); refreshRefsFromSources(); });
+  }
+
+  function stop(){
+    if(rafId != null){ cancelAnimationFrame(rafId); rafId = null; }
+    if(resyncTimer != null){ clearInterval(resyncTimer); resyncTimer = null; }
+    window.removeEventListener('flows:update', () => {});
+    window.removeEventListener('blend:updated', () => {});
+    window.removeEventListener('bunkertimers:updated', () => {});
+  }
+
+  // expose control object
+  window.bunkerDrainExactAnimator = { start, stop, resync: resyncMetadata };
+
+  // auto-start (after a short delay to let other scripts wire up timers)
+  document.addEventListener('DOMContentLoaded', () => { setTimeout(start, 200); });
+
+})();
+</script> -->
+
+
+<!-- Exact-time bunker drain visualizer
+  - Drains each active (bottom) layer exactly in accordance with the timer provided by nextBlendBinder.
+  - If nextBlendBinder.state is available we use its authoritative sequence[] (seconds) and remaining/idx values.
+  - We compute a continuous estimated remaining time by taking the binder's remaining when we saw it and subtracting real elapsed time.
+  - When estimated remaining hits 0 we locally advance to the next layer so the UI reveals the next layer without jumping.
+  - Falls back to computing seconds from window.LATEST_BLEND if binder is not present.
+  - Assumes renderBunkerIntoSVG produced <rect> elements with data-mill (bunker index) and data-row (blend.rows index) attributes.
+  - Paste this after your NextBlendBinder / dashboard.js and before the end of the body.
+-->
+
+<!-- <script>
+(function(){
+  const BUNKER_COUNT = 6;
+  const usableTopY = 10, usableBottomY = 140;
+  const usableH = usableBottomY - usableTopY;
+
+  // ---- helpers ----
+  function extractNumber(v){
+    if(v === null || typeof v === 'undefined') return null;
+    if(typeof v === 'number') return v;
+    if(typeof v === 'string' && v.trim() !== '') {
+      const n = Number(String(v).replace(/,/g,''));
+      return Number.isFinite(n) ? n : null;
+    }
+    if(typeof v === 'object'){
+      if(v.$numberInt) return Number(v.$numberInt);
+      if(v.$numberDouble) return Number(v.$numberDouble);
+      if(v.$numberLong) return Number(v.$numberLong);
+      if(v.$date) return Number(v.$date);
+      try{
+        const s = JSON.stringify(v);
+        const m = s.match(/-?\d+(\.\d+)?/);
+        if(m) return Number(m[0]);
+      }catch(e){}
+    }
+    return null;
+  }
+
+  // bottom->top list of global blend.rows indices which have a non-zero percent for this bunker
+  function buildRowIndexSeqForBunker(blend, bunkerIndex){
+    const seq = [];
+    if(!blend || !Array.isArray(blend.rows)) return seq;
+    for(let r = blend.rows.length - 1; r >= 0; r--){
+      const row = blend.rows[r];
+      let p = null;
+      if(Array.isArray(row.percentages) && row.percentages.length > bunkerIndex){
+        p = extractNumber(row.percentages[bunkerIndex]);
+      } else if(typeof row.percent === 'number' && bunkerIndex === 0){
+        p = extractNumber(row.percent);
+      } else if(row.percent){
+        p = extractNumber(row.percent);
+      }
+      if(p !== null && p > 0) seq.push(r);
+    }
+    return seq;
+  }
+
+  // seconds per layer (bottom->top) computed from blend as fallback
+  function computeLayerSecondsFromBlend(blend, bunkerIndex){
+    const bunkerCapacity = extractNumber(blend && blend.bunkerCapacity) || 0;
+    const flows = Array.isArray(blend && blend.flows) ? blend.flows : (Array.isArray(window.__flowsFromBinder) ? window.__flowsFromBinder : []);
+    const flow = extractNumber(flows[bunkerIndex]) || 0;
+    const seqRowIndexes = buildRowIndexSeqForBunker(blend, bunkerIndex);
+    const seconds = seqRowIndexes.map(r => {
+      const row = blend.rows && blend.rows[r] ? blend.rows[r] : null;
+      let p = null;
+      if(row){
+        if(Array.isArray(row.percentages) && row.percentages.length > bunkerIndex) p = extractNumber(row.percentages[bunkerIndex]);
+        else if(typeof row.percent === 'number' && bunkerIndex === 0) p = extractNumber(row.percent);
+        else if(row.percent) p = extractNumber(row.percent);
+      }
+      if(!bunkerCapacity || !flow || flow <= 0 || p === null || p <= 0) return 0;
+      const hours = (Number(p) / 100.0) * Number(bunkerCapacity) / Number(flow);
+      return hours * 3600;
+    });
+    return seconds;
+  }
+
+  // map rowIndex -> rect element for a bunker
+  function mapRectElementsForBunker(bIndex){
+    const rects = Array.from(document.querySelectorAll(`svg rect[data-mill="${bIndex}"]`));
+    const map = new Map();
+
+    // Try mapping by explicit data-row attribute first
+    rects.forEach(r => {
+      const ra = r.getAttribute('data-row');
+      if(ra === null || ra === '') return;
+      const ri = isNaN(Number(ra)) ? ra : Number(ra);
+      map.set(Number(ri), r);
+    });
+
+    // fallback: if no mapping found, map by DOM order (best-effort)
+    if(map.size === 0 && rects.length > 0){
+      // assume rects were appended in bottom->top order by render function
+      const seqFallback = rects.slice(0);
+      // assign indexes 0..N-1 as temporary keys (these keys won't match blend row indexes)
+      seqFallback.forEach((r, idx) => map.set(idx, r));
+    }
+    return map;
+  }
+
+  // compute full heights px for seqRowIndexes (bottom->top) using blend percent
+  function computeFullHeights(blend, bunkerIndex, seqRowIndexes){
+    return seqRowIndexes.map(r => {
+      const row = blend && Array.isArray(blend.rows) ? blend.rows[r] : null;
+      let p = null;
+      if(row){
+        if(Array.isArray(row.percentages) && row.percentages.length > bunkerIndex) p = extractNumber(row.percentages[bunkerIndex]);
+        else if(typeof row.percent === 'number' && bunkerIndex === 0) p = extractNumber(row.percent);
+        else if(row.percent) p = extractNumber(row.percent);
+      }
+      return p ? (Math.max(0, Math.min(100, Number(p))) / 100) * usableH : 0;
+    });
+  }
+
+  function readBinderForBunker(b){
+    try{
+      const st = window.nextBlendBinder && Array.isArray(window.nextBlendBinder.state) ? window.nextBlendBinder.state[b] : null;
+      if(!st) return null;
+      return {
+        sequence: Array.isArray(st.sequence) ? st.sequence.slice(0) : null,
+        idx: (typeof st.idx === 'number') ? st.idx : 0,
+        remaining: (typeof st.remaining === 'number') ? st.remaining : null
+      };
+    }catch(e){ return null; }
+  }
+
+  // ---- local state ----
+  // binderRef: when we read binder.remaining we store it + timestamp so we can subtract real elapsed time
+  const local = Array.from({length: BUNKER_COUNT}, () => ({
+    seqRowIndexes: [],   // bottom->top global row indexes
+    seqSeconds: [],      // seconds per layer bottom->top
+    currentIdx: 0,       // current active layer index used for display
+    binderRef: null,     // { remaining, total, idx } at the time we last saw binder
+    binderRefTs: 0,      // timestamp ms when binderRef was recorded
+    rectMap: new Map(),  // mapping rowIndex -> rect element
+    fullHeights: [],     // full heights px bottom->top
+  }));
+
+  // Synchronize metadata from blend & binder (called periodically and at start)
+  function resyncAll(){
+    const blend = window.LATEST_BLEND || {};
+    for(let b=0;b<BUNKER_COUNT;b++){
+      // row index sequence bottom->top
+      const seqRowIndexes = buildRowIndexSeqForBunker(blend, b);
+      local[b].seqRowIndexes = seqRowIndexes.slice();
+
+      // rect map
+      local[b].rectMap = mapRectElementsForBunker(b);
+
+      // full heights px
+      local[b].fullHeights = computeFullHeights(blend, b, seqRowIndexes);
+
+      // prefer binder sequence if available and lengths match
+      const binder = readBinderForBunker(b);
+      if(binder && Array.isArray(binder.sequence) && binder.sequence.length === seqRowIndexes.length){
+        local[b].seqSeconds = binder.sequence.slice();
+        local[b].currentIdx = binder.idx || 0;
+        local[b].binderRef = {
+          remaining: binder.remaining,
+          total: binder.sequence[binder.idx] || null,
+          idx: binder.idx || 0
+        };
+        local[b].binderRefTs = Date.now();
+      } else {
+        // fallback compute seconds from blend
+        const secs = computeLayerSecondsFromBlend(blend, b);
+        local[b].seqSeconds = secs.slice();
+        local[b].currentIdx = 0;
+        local[b].binderRef = (secs && secs.length) ? { remaining: secs[0], total: secs[0], idx: 0 } : null;
+        local[b].binderRefTs = Date.now();
+      }
+    }
+  }
+
+  // Update when we detect binder changed — update binderRef so elapsed calc stays accurate
+  function refreshBinderRefsIfChanged(){
+    for(let b=0;b<BUNKER_COUNT;b++){
+      const binder = readBinderForBunker(b);
+      if(!binder) continue;
+      // if sequence changed, replace seqSeconds & recalc mapping (we'll resync seqRowIndexes length)
+      if(Array.isArray(binder.sequence) && JSON.stringify(binder.sequence) !== JSON.stringify(local[b].seqSeconds)){
+        local[b].seqSeconds = binder.sequence.slice();
+        // try to keep seqRowIndexes length match - resync structure
+        resyncAll();
+      }
+      // If idx or remaining changed, update binderRef and timestamp (authoritative)
+      const curRef = local[b].binderRef;
+      const changedIdx = (binder.idx !== (curRef && curRef.idx));
+      const changedRem = (typeof binder.remaining === 'number' && (!curRef || binder.remaining !== curRef.remaining));
+      if(changedIdx || changedRem){
+        const total = (Array.isArray(binder.sequence) && binder.sequence[binder.idx]) ? binder.sequence[binder.idx] : (local[b].seqSeconds[binder.idx] || null);
+        local[b].binderRef = { remaining: binder.remaining, total: total, idx: binder.idx };
+        local[b].binderRefTs = Date.now();
+        local[b].currentIdx = binder.idx || 0;
+      }
+    }
+  }
+
+  // compute estimated remaining for current layer using binderRef and now
+  function estimateRemainingFromBinderRef(b){
+    const ref = local[b].binderRef;
+    if(!ref || typeof ref.remaining !== 'number') return null;
+    const elapsed = (Date.now() - local[b].binderRefTs) / 1000.0;
+    return Math.max(0, ref.remaining - elapsed);
+  }
+
+  // Advance currentIdx locally when estimated remaining reaches zero so UI reveals next layer immediately
+  function tryAdvanceIfNeeded(b, estRemaining){
+    let changed = false;
+    while(estRemaining !== null && estRemaining <= 0){
+      const nextIdx = local[b].currentIdx + 1;
+      if(!Array.isArray(local[b].seqSeconds) || nextIdx >= local[b].seqSeconds.length) {
+        // no more layers -> keep at end
+        local[b].currentIdx = Math.min(local[b].currentIdx, (local[b].seqSeconds.length -1));
+        break;
+      }
+      // advance
+      local[b].currentIdx = nextIdx;
+      // set new binderRef to the new layer duration (we don't know exact remaining from binder until it updates)
+      const nextTotal = local[b].seqSeconds[nextIdx] || null;
+      local[b].binderRef = { remaining: nextTotal, total: nextTotal, idx: nextIdx };
+      local[b].binderRefTs = Date.now();
+      estRemaining = nextTotal;
+      changed = true;
+    }
+    return changed;
+  }
+
+  // Core frame update: compute visible heights based on exact fraction = estRemaining/total
+  function updateFrame(){
+    // first, check binder for small changes (authoritative)
+    refreshBinderRefsIfChanged();
+
+    for(let b=0;b<BUNKER_COUNT;b++){
+      const seqRowIndexes = local[b].seqRowIndexes || [];
+      const seqSeconds = local[b].seqSeconds || [];
+      // ensure currentIdx bounds
+      local[b].currentIdx = Math.min(Math.max(0, local[b].currentIdx || 0), Math.max(0, seqSeconds.length - 1));
+
+      // estimate remaining for display
+      let estRemaining = estimateRemainingFromBinderRef(b);
+      // if binderRef missing, fallback to seqSeconds[currentIdx]
+      if(estRemaining === null && Array.isArray(seqSeconds) && seqSeconds.length > local[b].currentIdx){
+        estRemaining = seqSeconds[local[b].currentIdx];
+        // set binderRef so further frames will estimate by elapsed
+        local[b].binderRef = { remaining: estRemaining, total: seqSeconds[local[b].currentIdx], idx: local[b].currentIdx };
+        local[b].binderRefTs = Date.now();
+      }
+
+      // if remaining went to zero, locally advance
+      tryAdvanceIfNeeded(b, estRemaining);
+
+      // recompute estRemaining after possible advance
+      estRemaining = estimateRemainingFromBinderRef(b);
+
+      // compute fractions & update rects
+      let cumVisible = 0;
+      for(let layerIdx=0; layerIdx < seqRowIndexes.length; layerIdx++){
+        const rowIndex = seqRowIndexes[layerIdx];
+        const rect = local[b].rectMap ? local[b].rectMap.get(Number(rowIndex)) : null;
+        // determine full height for this layer
+        const fullH = (local[b].fullHeights && local[b].fullHeights[layerIdx]) ? Number(local[b].fullHeights[layerIdx]) : 0;
+        let visibleH = fullH;
+
+        if(layerIdx < local[b].currentIdx){
+          visibleH = 0;
+        } else if(layerIdx === local[b].currentIdx){
+          const totalForLayer = (Array.isArray(local[b].seqSeconds) && local[b].seqSeconds.length > layerIdx) ? Number(local[b].seqSeconds[layerIdx]) : null;
+          if(totalForLayer && totalForLayer > 0 && typeof estRemaining === 'number' && estRemaining >= 0){
+            const frac = Math.max(0, Math.min(1, estRemaining / totalForLayer));
+            visibleH = fullH * frac;
+          } else if(totalForLayer === 0){
+            visibleH = 0;
+          } else {
+            visibleH = fullH;
+          }
+        } else {
+          visibleH = fullH;
+        }
+
+        if(rect){
+          const y = usableBottomY - (cumVisible + visibleH);
+          rect.setAttribute('height', String(visibleH));
+          rect.setAttribute('y', String(y));
+          if(layerIdx === local[b].currentIdx){
+            rect.classList.add('util-active');
+            rect.classList.remove('util-inactive');
+          } else {
+            rect.classList.remove('util-active');
+            rect.classList.add('util-inactive');
+          }
+        }
+        cumVisible += visibleH;
+      }
+
+      // hide any rects not present in seqRowIndexes
+      if(local[b].rectMap){
+        local[b].rectMap.forEach((rect, rIndex) => {
+          if(seqRowIndexes.indexOf(Number(rIndex)) === -1){
+            rect.setAttribute('height', '0');
+            rect.setAttribute('y', String(usableBottomY));
+            rect.classList.remove('util-active');
+            rect.classList.add('util-inactive');
+          }
+        });
+      }
+    }
+
+    // schedule next frame
+    requestAnimationFrame(updateFrame);
+  }
+
+  // ---- start/stop ----
+  let started = false;
+  let resyncInterval = null;
+  function startVisualizer(){
+    if(started) return;
+    // initial sync
+    resyncAll();
+    // start RAF loop
+    requestAnimationFrame(updateFrame);
+    // keep structure in sync every 1s (adjust if you want)
+    resyncInterval = setInterval(resyncAll, 1000);
+    // also resync when app updates blend/flows
+    window.addEventListener('flows:update', resyncAll);
+    window.addEventListener('blend:updated', resyncAll);
+    started = true;
+  }
+  function stopVisualizer(){
+    if(!started) return;
+    if(resyncInterval) { clearInterval(resyncInterval); resyncInterval = null; }
+    window.removeEventListener('flows:update', resyncAll);
+    window.removeEventListener('blend:updated', resyncAll);
+    started = false;
+    // note: RAF will continue until page reload; to fully stop you'd need to cancelRequestAnimationFrame (not kept here)
+  }
+
+  window.bunkerDrainExact = { start: startVisualizer, stop: stopVisualizer, resync: resyncAll };
+
+  // auto-start shortly after DOM ready so SVGs exist
+  document.addEventListener('DOMContentLoaded', () => { setTimeout(startVisualizer, 300); });
+
+})();
+</script> -->
+
+
+<!-- <script>
+/*
+  Utilization color binder
+  - Uses the same bottom->top row-index sequence logic as NextBlendBinder
+  - Maps nextBlendBinder.state[b].idx -> actual rowIndex and highlights that rect in bunker SVG
+  - Fallbacks: uses bunker.layers rowIndex if available, else bottom-most row from blend.rows
+  - Keeps running every 1s and also runs after overview/single render.
+*/
+(function(){
+  const BUNKER_COUNT = 6;
+  const POLL_MS = 1000;
+
+  function extractNumber(v){
+    if(v === null || typeof v === 'undefined') return null;
+    if(typeof v === 'number') return v;
+    if(typeof v === 'string' && v.trim() !== ''){
+      const n = Number(String(v).replace(/,/g,''));
+      return Number.isFinite(n) ? n : null;
+    }
+    if(typeof v === 'object'){
+      if(v.$numberInt) return Number(v.$numberInt);
+      if(v.$numberDouble) return Number(v.$numberDouble);
+      if(v.$numberLong) return Number(v.$numberLong);
+      if(v.$date) return Number(v.$date);
+      try{
+        const s = JSON.stringify(v);
+        const m = s.match(/-?\d+(\.\d+)?/);
+        if(m) return Number(m[0]);
+      }catch(e){}
+    }
+    return null;
+  }
+
+  // Build bottom->top row index list for a bunker from blend.rows (same logic as binder)
+  function buildRowIndexSeqForBunker(blend, bunkerIndex){
+    const seq = [];
+    if(!blend || !Array.isArray(blend.rows)) return seq;
+    for(let r = blend.rows.length - 1; r >= 0; r--){
+      const row = blend.rows[r];
+      let p = null;
+      if(Array.isArray(row.percentages) && row.percentages.length > bunkerIndex){
+        p = extractNumber(row.percentages[bunkerIndex]);
+      } else if(typeof row.percent === 'number' && bunkerIndex === 0){
+        p = extractNumber(row.percent);
+      } else if(row.percent){
+        p = extractNumber(row.percent);
+      }
+      if(p !== null && p !== 0) seq.push(r);
+    }
+    return seq; // e.g. [3, 1] -> bottom rowIndex 3, then 1 above it
+  }
+
+  // Try to obtain bottom-most rowIndex from per-bunker layers if present (blend.bunkers[b].layers[0].rowIndex)
+  function getRowIndexFromBunkerLayers(blend, bunkerIndex){
+    try{
+      if(!blend || !Array.isArray(blend.bunkers)) return null;
+      const b = blend.bunkers[bunkerIndex];
+      if(!b || !Array.isArray(b.layers) || b.layers.length === 0) return null;
+      const layer = b.layers[0]; // assumed bottom-most layer in layers[]
+      if(layer && (layer.rowIndex !== undefined && layer.rowIndex !== null)) return layer.rowIndex;
+    }catch(e){}
+    return null;
+  }
+
+  // Determine actual chosen rowIndex (the one being utilised) for a bunker
+  function determineActiveRowIndex(blend, bunkerIndex){
+    const seq = buildRowIndexSeqForBunker(blend, bunkerIndex); // bottom->top row indexes
+    // 1) Prefer nextBlendBinder.state mapping
+    if(window.nextBlendBinder && Array.isArray(window.nextBlendBinder.state)){
+      const st = window.nextBlendBinder.state[bunkerIndex];
+      if(st && Array.isArray(st.sequence)){
+        const idx = (typeof st.idx === 'number') ? st.idx : 0;
+        if(Array.isArray(seq) && seq.length > 0){
+          const safeIdx = Math.min(Math.max(0, idx), seq.length - 1);
+          return seq[safeIdx];
+        }
+      }
+    }
+    // 2) fallback: use per-bunker layer mapping if available
+    const rFromLayers = getRowIndexFromBunkerLayers(blend, bunkerIndex);
+    if(rFromLayers !== null && rFromLayers !== undefined) return rFromLayers;
+    // 3) deterministic fallback: bottom-most row from blend.rows
+    if(Array.isArray(seq) && seq.length > 0) return seq[0];
+    return null;
+  }
+
+  // Update SVG rect classes to reflect utilization
+  function updateUtilizationColors(){
+    const blend = window.LATEST_BLEND || {};
+    for(let b = 0; b < BUNKER_COUNT; b++){
+      const activeRowIndex = determineActiveRowIndex(blend, b);
+      // select rects inside all SVGs that belong to this bunker (data-mill attribute)
+      const rects = document.querySelectorAll(`svg rect[data-mill="${b}"]`);
+      rects.forEach(rect => {
+        // rect.dataset.row may be string or empty; convert both sides to string for safe compare
+        const rectRowAttr = rect.getAttribute('data-row');
+        // Some renderers may store rowIndex as number or as string; handle both
+        const rectRowNum = (rectRowAttr === null || rectRowAttr === '') ? null : (isNaN(Number(rectRowAttr)) ? rectRowAttr : Number(rectRowAttr));
+        if(activeRowIndex === null){
+          rect.classList.remove('util-active');
+          rect.classList.add('util-inactive');
+        } else {
+          // If rectRowNum equals activeRowIndex -> active
+          if(rectRowNum !== null && Number(rectRowNum) === Number(activeRowIndex)){
+            rect.classList.add('util-active');
+            rect.classList.remove('util-inactive');
+            // also ensure parent bunker element has marker class (optional)
+            const bunkerEl = rect.closest('.bunker');
+            if(bunkerEl) bunkerEl.classList.add('bunker-util');
+          } else {
+            rect.classList.remove('util-active');
+            rect.classList.add('util-inactive');
+          }
+        }
+      });
+    }
+  }
+
+  // run periodically and also expose function to call after render
+  let __timer = null;
+  function start(){
+    if(__timer) return;
+    updateUtilizationColors();
+    __timer = setInterval(updateUtilizationColors, POLL_MS);
+    // update on events that change flows/blend/timers
+    window.addEventListener('flows:update', updateUtilizationColors);
+    window.addEventListener('blend:updated', updateUtilizationColors);
+    // keep sync when NextBlendBinder recomputes (it doesn't emit an event by default) - hook into its recompute timer if present:
+    if(window.nextBlendBinder && typeof window.nextBlendBinder.recompute === 'function'){
+      // nothing to attach to, but we still poll above
+    }
+  }
+  function stop(){
+    if(__timer){ clearInterval(__timer); __timer = null; }
+    window.removeEventListener('flows:update', updateUtilizationColors);
+    window.removeEventListener('blend:updated', updateUtilizationColors);
+  }
+
+  // convenience: call update immediately after overview/single render
+  // Patch renderOverview and renderSingle by wrapping original functions if present
+  function patchRenderHooks(){
+    try{
+      if(typeof renderOverview === 'function'){
+        const orig = renderOverview;
+        window.renderOverview = function(blend, coalDB){
+          orig.call(this, blend, coalDB);
+          // small delay so svg DOM is ready
+          setTimeout(updateUtilizationColors, 80);
+        };
+      }
+      if(typeof renderSingle === 'function'){
+        const origS = renderSingle;
+        window.renderSingle = function(bunkerIndex, blend, coalDB){
+          origS.call(this, bunkerIndex, blend, coalDB);
+          setTimeout(updateUtilizationColors, 80);
+        };
+      }
+    }catch(e){ /* ignore */ }
+  }
+
+  // expose API
+  window.utilizationColorBinder = {
+    start,
+    stop,
+    update: updateUtilizationColors,
+    determineActiveRowIndex
+  };
+
+  document.addEventListener('DOMContentLoaded', () => {
+    patchRenderHooks();
+    setTimeout(start, 400);
+  });
+})();
+</script> -->
+
+
+
+
+
+
+
+
+<!-- Estimated Generation (MW) — precise mapping to NextBlendBinder's bottom-coal logic -->
+<!-- <script>
+(function(){
+  const BUNKER_COUNT = 6;
+  const BOX_PREFIX = 'estGenBox-';
+  const UPDATE_MS = 1000;
+
+  // robust numeric extractor (handles raw numbers, strings and MongoDB wrappers)
+  function extractNumber(v){
+    if(v === null || typeof v === 'undefined') return null;
+    if(typeof v === 'number') return v;
+    if(typeof v === 'string' && v.trim() !== ''){
+      const n = Number(v.replace(/,/g,'')); // tolerate commas
+      return Number.isFinite(n) ? n : null;
+    }
+    if(typeof v === 'object'){
+      if(v.$numberInt) return Number(v.$numberInt);
+      if(v.$numberDouble) return Number(v.$numberDouble);
+      if(v.$numberLong) return Number(v.$numberLong);
+      if(v.$date) return Number(v.$date);
+      // fallback: try any numeric-looking substring
+      try{
+        const s = JSON.stringify(v);
+        const m = s.match(/-?\d+(\.\d+)?/);
+        if(m) {
+          const n = Number(m[0]);
+          return Number.isFinite(n) ? n : null;
+        }
+      }catch(e){}
+    }
+    return null;
+  }
+
+  // flows precedence (same approach as other binders)
+  function getFlows(blend){
+    if(Array.isArray(blend && blend.flows)) return blend.flows;
+    if(Array.isArray(window.flows)) return window.flows;
+    if(Array.isArray(window.__flowsFromBinder)) return window.__flowsFromBinder;
+    return [];
+  }
+
+  // Build per-bunker sequence of row indices in the exact same order NextBlendBinder uses:
+  // iterate blend.rows bottom->top and collect rows where percent for that bunker > 0.
+  // result: [[rIndex1, rIndex2, ...], ...] for each bunker
+  function buildRowIndexSequences(blend){
+    const seqs = Array.from({length: BUNKER_COUNT}, () => []);
+    if(!blend || !Array.isArray(blend.rows)) return seqs;
+    for(let b = 0; b < BUNKER_COUNT; b++){
+      for(let r = blend.rows.length - 1; r >= 0; r--){
+        const row = blend.rows[r];
+        let p = null;
+        if(Array.isArray(row.percentages) && row.percentages.length > b){
+          p = extractNumber(row.percentages[b]);
+        } else if(typeof row.percent === 'number' && b === 0){
+          p = extractNumber(row.percent);
+        } else if(row.percent){
+          p = extractNumber(row.percent);
+        }
+        if(p !== null && p !== 0){
+          seqs[b].push(r); // store actual row index (bottom->top)
+        }
+      }
+    }
+    return seqs;
+  }
+
+  // read heatRate from DOM element with id "HEATRATE" if present, otherwise fallback to blend.heatRate
+  function readHeatRate(blend){
+    const el = document.getElementById && document.getElementById('HEATRATE');
+    if(el){
+      // try element textContent or value
+      const txt = (el.value !== undefined && el.value !== null) ? el.value : (el.textContent || el.innerText || '');
+      const n = extractNumber(txt);
+      if(n !== null) return n;
+    }
+    return extractNumber(blend && blend.heatRate);
+  }
+
+  // single update tick: compute MW per bunker using:
+  // MW = (flow_bunker) * (gcv_of_current_bottom_coal_for_bunker) / heatRate
+  function updateOnce(){
+    const blend = window.LATEST_BLEND || {};
+    const flows = getFlows(blend);
+    const heatRate = readHeatRate(blend); // prefer DOM HEATRATE id as requested
+
+    // build deterministic rowIndex sequences (bottom->top) matching NextBlendBinder
+    const rowIndexSeqs = buildRowIndexSequences(blend);
+
+    for(let b = 0; b < BUNKER_COUNT; b++){
+      const box = document.getElementById(BOX_PREFIX + b);
+      if(!box) continue;
+      const valEl = box.querySelector && box.querySelector('.value');
+      if(!valEl) continue;
+
+      const rawFlow = Array.isArray(flows) ? flows[b] : null;
+      const flowVal = extractNumber(rawFlow);
+
+      // determine which row index is the "current bottom coal" for this bunker.
+      // Prefer nextBlendBinder.state mapping for exact sync with timers; else fallback to first (bottom-most).
+      let chosenRowIndex = null;
+
+      if(window.nextBlendBinder && Array.isArray(window.nextBlendBinder.state)){
+        try{
+          const st = window.nextBlendBinder.state[b];
+          if(st && Array.isArray(st.sequence)){
+            const idx = (typeof st.idx === 'number') ? st.idx : 0;
+            const seq = rowIndexSeqs[b] || [];
+            if(seq.length > 0){
+              // if idx within bounds use it, otherwise clamp to nearest valid index
+              const safeIndex = Math.min(Math.max(0, idx), seq.length - 1);
+              chosenRowIndex = seq[safeIndex];
+            }
+          }
+        }catch(e){
+          chosenRowIndex = null;
+        }
+      }
+
+      // fallback deterministic: bottom-most non-zero percent row
+      if(chosenRowIndex === null){
+        const seq = rowIndexSeqs[b];
+        if(Array.isArray(seq) && seq.length > 0) chosenRowIndex = seq[0];
+      }
+
+      // read gcv from the chosen row
+      const gcv = (chosenRowIndex !== null && Array.isArray(blend.rows) && blend.rows[chosenRowIndex]) ?
+                  extractNumber(blend.rows[chosenRowIndex].gcv) : null;
+
+      // compute MW
+      let outText = '--';
+      if(flowVal !== null && flowVal > 0 && gcv !== null && typeof heatRate === 'number' && heatRate > 0){
+        const mw = (Number(flowVal) * Number(gcv)) / Number(heatRate);
+        outText = Number.isFinite(mw) ? mw.toFixed(2) : '--';
+      }
+
+      valEl.innerText = outText;
+    }
+  }
+
+  // init / lifecycle
+  let __timer = null;
+  function start(){
+    if(__timer) return;
+    updateOnce();
+    __timer = setInterval(updateOnce, UPDATE_MS);
+    window.addEventListener('flows:update', updateOnce);
+    // if your app triggers a custom event after LATEST_BLEND updates, you can call:
+    // window.dispatchEvent(new Event('blend:updated')); to force immediate recompute
+    window.addEventListener('blend:updated', updateOnce);
+  }
+  function stop(){
+    if(__timer){ clearInterval(__timer); __timer = null; }
+    window.removeEventListener('flows:update', updateOnce);
+    window.removeEventListener('blend:updated', updateOnce);
+  }
+
+  window.estimatedGenerationBinder = { start, stop, update: updateOnce };
+
+  document.addEventListener('DOMContentLoaded', () => {
+    // small delay so dashboard may populate window.LATEST_BLEND and nextBlendBinder
+    setTimeout(start, 600);
+  });
+})();
+</script> -->
+
 
 
 </body>
