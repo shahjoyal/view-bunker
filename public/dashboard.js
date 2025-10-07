@@ -251,10 +251,10 @@ document.addEventListener('DOMContentLoaded', () => {
   refreshAndRender('overview', 0).catch(e => console.error(e));
 
   // optional periodic update to re-fetch (kept but can be removed)
-  setInterval(() => {
-    const active = document.querySelector('.sidebar .item.active');
-    const mode = active ? active.dataset.mode : 'overview';
-    const idx = active && active.dataset.index ? Number(active.dataset.index) : 0;
-    refreshAndRender(mode, idx).catch(e => console.error(e));
-  }, 12000);
+  // setInterval(() => {
+  //   const active = document.querySelector('.sidebar .item.active');
+  //   const mode = active ? active.dataset.mode : 'overview';
+  //   const idx = active && active.dataset.index ? Number(active.dataset.index) : 0;
+  //   refreshAndRender(mode, idx).catch(e => console.error(e));
+  // }, 12000);
 });
