@@ -454,6 +454,73 @@ html, body {
      .single-mode .diagram-column { width: 100% !important; }
 */
 
+/* ----- Ensure stats panel stays visible and above diagram overlays ----- */
+/* Put this near the end of your <style> inside input.html head */
+.stats-panel {
+  z-index: 999 !important;           /* keep it above top-overlay */
+  position: sticky !important;       /* keep sticky behaviour */
+  top: calc(var(--topbar-height) + 12px) !important;
+}
+
+/* Allow the layout-card to show sticky children (prevent clipping) */
+.layout-card {
+  overflow: visible !important;
+}
+
+/* Ensure stats-column is visible when not intentionally in single-mode */
+.app:not(.single-mode) .stats-column {
+  display: block !important;
+}
+/* ------------------ Keep stats panel at the right on desktop ------------------ */
+/* Desktop: prevent layout-row wrapping so stats-column stays to the right */
+@media (min-width: 1100px) {
+  .layout-row {
+    flex-wrap: nowrap;            /* prevent second-line wrapping */
+    align-items: stretch;
+    gap: 12px;
+    min-height: 0;
+  }
+
+  /* Diagram column takes remaining space and can scroll internally if content is wide */
+  .diagram-column {
+    flex: 1 1 0;
+    min-width: 0;                 /* allow it to shrink below content width */
+    overflow: auto;               /* internal scroll if needed; won't push stats down */
+    max-height: calc(100% - 0px);
+  }
+
+  /* Keep stats fixed width on the right (non-shrinking) */
+  .stats-column {
+    flex: 0 0 160px;              /* fixed width, won’t shrink below 160px */
+    width: 160px;
+    order: 2;                     /* ensure it's the right column */
+  }
+
+  /* Bunkers grid should live inside diagram-column and not force whole layout to grow */
+  .bunkers-grid {
+    box-sizing: border-box;
+    flex: 1 1 auto;
+    padding-right: 12px;          /* breathing room so right-most items don't hit stats */
+    overflow:hidden;            /* internal wrapping of bunkers is still allowed */
+  }
+}
+
+/* Preserve stacking behaviour on narrow screens (mobile/tablet) */
+@media (max-width: 1099px) {
+  .layout-row {
+    flex-wrap: wrap;
+  }
+  .stats-column {
+    width: 100%;
+    order: 2;
+    flex: 0 0 auto;
+  }
+  .diagram-column {
+    width: 100%;
+    order: 1;
+    overflow: visible;
+  }
+}
 
 
   </style>
@@ -1087,6 +1154,16 @@ document.addEventListener('DOMContentLoaded', () => {
       location.reload();
     });
   }
+});
+</script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  // Defensive: remove accidental single-mode if present (so stats-column is visible)
+  document.body.classList.remove('single-mode');
+
+  // Also ensure the .stats-column element is not hidden by inline styles
+  const sc = document.querySelector('.stats-column');
+  if (sc) sc.style.display = sc.style.display || 'block';
 });
 </script>
 
