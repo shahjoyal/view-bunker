@@ -1,6 +1,101 @@
 // dashboard.js (sidebar + overview + single-bunker view) — fixed unique clipPath ids + reduced single view size
 const API_BASE = window.location.origin + '/api';
 const DEFAULT_COAL_COLORS = ["#f39c12","#3498db","#2ecc71","#ef4444","#8b5cf6","#14b8a6","#f97316","#06b6d4"];
+// color mapping helpers (paste right after DEFAULT_COAL_COLORS)
+const COAL_COLOR_STORAGE_KEY = 'coalColorMap_v1';
+let COAL_COLOR_MAP = (function loadMap(){
+  try{
+    const j = localStorage.getItem(COAL_COLOR_STORAGE_KEY);
+    if(j) return JSON.parse(j);
+  }catch(e){ /* ignore */ }
+  return {}; // key -> color
+})();
+
+let _paletteIndex = 0; // used if we must round-robin
+
+function saveColorMapToStorage(){
+  try{ localStorage.setItem(COAL_COLOR_STORAGE_KEY, JSON.stringify(COAL_COLOR_MAP)); }catch(e){ /* ignore */ }
+}
+
+/**
+ * normalizeKey - normalize a coal identifier/name to a stable key
+ * Accepts string or numeric id; returns lowercased trimmed string.
+ */
+function normalizeKey(coalNameOrId){
+  if(coalNameOrId === null || typeof coalNameOrId === 'undefined') return '';
+  return String(coalNameOrId).trim().toLowerCase();
+}
+
+/**
+ * pre-populate map from coalDB entries that already have colours
+ * call this once whenever you have the fetched coalDB
+ */
+function syncColorMapFromCoalDB(coalDB){
+  try{
+    if(!Array.isArray(coalDB)) return;
+    for(const entry of coalDB){
+      if(!entry) continue;
+      // entry might have fields: coal (name), name, id, color or colour
+      const possibleKey = (entry.coal || entry.name || entry.id || '').toString();
+      const key = normalizeKey(possibleKey);
+      const col = entry.color || entry.colour || null;
+      if(key && col && !COAL_COLOR_MAP[key]){
+        COAL_COLOR_MAP[key] = String(col);
+      }
+    }
+    saveColorMapToStorage();
+  }catch(e){ /* ignore */ }
+}
+
+/**
+ * findCoalColor - returns a stable color for the given coal name/id.
+ * Priority:
+ *   1) explicit colour on coalDB entry (color / colour)
+ *   2) persistent COAL_COLOR_MAP (localStorage)
+ *   3) assign next unused from DEFAULT_COAL_COLORS (or round-robin)
+ */
+function findCoalColor(coalNameOrId, coalDB){
+  try{
+    if(!coalNameOrId) return null;
+    const key = normalizeKey(coalNameOrId);
+
+    // 1) if map already has it, return
+    if(COAL_COLOR_MAP[key]) return COAL_COLOR_MAP[key];
+
+    // 2) check coalDB for explicit color (match by name or by id)
+    if(Array.isArray(coalDB)){
+      const byExactName = coalDB.find(c => (c.coal || c.name || '').toString().trim().toLowerCase() === key);
+      if(byExactName && (byExactName.color || byExactName.colour)){
+        COAL_COLOR_MAP[key] = byExactName.color || byExactName.colour;
+        saveColorMapToStorage();
+        return COAL_COLOR_MAP[key];
+      }
+      // try to match by id if coalNameOrId is id-like
+      const byId = coalDB.find(c => (typeof c.id !== 'undefined' && String(c.id) === String(coalNameOrId)));
+      if(byId && (byId.color || byId.colour)){
+        COAL_COLOR_MAP[key] = byId.color || byId.colour;
+        saveColorMapToStorage();
+        return COAL_COLOR_MAP[key];
+      }
+    }
+
+    // 3) assign an unused color from palette if possible
+    const used = new Set(Object.values(COAL_COLOR_MAP || {}));
+    let color = DEFAULT_COAL_COLORS.find(c => !used.has(c));
+    if(!color){
+      // all used — fallback to round-robin stable assignment
+      color = DEFAULT_COAL_COLORS[_paletteIndex % DEFAULT_COAL_COLORS.length];
+      _paletteIndex++;
+    }
+
+    COAL_COLOR_MAP[key] = color;
+    saveColorMapToStorage();
+    return color;
+  }catch(e){
+    console.error('findCoalColor error', e);
+    return null;
+  }
+}
 
 /* ---------- fetch helpers ---------- */
 async function fetchCoalDB(){
@@ -12,12 +107,12 @@ async function fetchBlendLatest(){
   catch(e){ console.error('blend fetch err', e); return null; }
 }
 function safeNum(v){ return (v === null || typeof v === 'undefined' || isNaN(Number(v))) ? null : Number(v); }
-function findCoalColor(coalNameOrId, coalDB){
-  if(!coalNameOrId) return null;
-  const byName = coalDB.find(c => (c.coal||'').toLowerCase() === String(coalNameOrId).toLowerCase());
-  if(byName && (byName.color || byName.colour)) return byName.color || byName.colour;
-  return null;
-}
+// function findCoalColor(coalNameOrId, coalDB){
+//   if(!coalNameOrId) return null;
+//   const byName = coalDB.find(c => (c.coal||'').toLowerCase() === String(coalNameOrId).toLowerCase());
+//   if(byName && (byName.color || byName.colour)) return byName.color || byName.colour;
+//   return null;
+// }
 
 /* ---------- Tooltip helpers (floating DOM tooltip) ---------- */
 const coalTip = document.getElementById('coalTooltip');
@@ -131,8 +226,11 @@ function populateStats(metrics){
   setText('COSTRATE', (metrics.costRate !== undefined) ? Number(metrics.costRate).toFixed(2) : '--');
 }
 
-/* ---------- render overview (all 6 bunkers) ---------- */
+/* ---------- render overview (all bunkers) ---------- */
 function renderOverview(blend, coalDB){
+  // ensure we leave single-mode and restore multi-column layout
+  try { document.body.classList.remove('single-mode'); } catch(e) { /* ignore */ }
+
   const bunkers = document.querySelectorAll('.bunker');
   bunkers.forEach((bEl, idx) => {
     const bdata = (Array.isArray(blend.bunkers) && blend.bunkers[idx]) ? blend.bunkers[idx] : { layers: [] };
@@ -143,20 +241,29 @@ function renderOverview(blend, coalDB){
   });
 
   // show overview, hide single
-  document.getElementById('overviewView').style.display = '';
-  document.getElementById('singleView').style.display = 'none';
-  const topOverlay = document.getElementById('topOverlay');
-  topOverlay.style.display = '';
-  // show all arrows
-  const arrows = topOverlay.querySelectorAll('.arrow');
-  arrows.forEach(a => a.style.display = '');
-  // remove any single arrow duplicates
-  const single = topOverlay.querySelector('.arrow.single');
+  const ov = document.getElementById('overviewView');
+  const single = document.getElementById('singleView');
+  if(ov) ov.style.display = '';
   if(single) single.style.display = 'none';
+
+  const topOverlay = document.getElementById('topOverlay');
+  if(topOverlay) topOverlay.style.display = '';
+
+  // show all arrows
+  if(topOverlay){
+    const arrows = topOverlay.querySelectorAll('.arrow');
+    arrows.forEach(a => a.style.display = '');
+    // remove any single arrow duplicates
+    const singleArrow = topOverlay.querySelector('.arrow.single');
+    if(singleArrow) singleArrow.style.display = 'none';
+  }
 }
 
 /* ---------- render single bunker view ---------- */
 function renderSingle(bunkerIndex, blend, coalDB){
+  // ensure body enters single-mode so CSS expands the layout
+  try { document.body.classList.add('single-mode'); } catch(e) { /* ignore */ }
+
   const singleSvg = document.getElementById('singleSvg');
   const singleLabel = document.getElementById('singleLabel');
   const bdata = (Array.isArray(blend.bunkers) && blend.bunkers[bunkerIndex]) ? blend.bunkers[bunkerIndex] : { layers: [] };
@@ -170,28 +277,34 @@ function renderSingle(bunkerIndex, blend, coalDB){
   singleLabel.textContent = `Bunker ${bunkerIndex + 1}`;
 
   // show single and hide overview
-  document.getElementById('overviewView').style.display = 'none';
-  document.getElementById('singleView').style.display = '';
+  const ov = document.getElementById('overviewView');
+  const singleView = document.getElementById('singleView');
+  if(ov) ov.style.display = 'none';
+  if(singleView) singleView.style.display = '';
 
   // top overlay: hide all arrows and show one centered arrow
   const topOverlay = document.getElementById('topOverlay');
-  topOverlay.style.display = '';
-  const arrows = topOverlay.querySelectorAll('.arrow');
-  arrows.forEach(a => a.style.display = 'none');
-  let singleArrow = topOverlay.querySelector('.arrow.single');
-  if(!singleArrow){
-    singleArrow = document.createElement('div');
-    singleArrow.className = 'arrow single';
-    topOverlay.appendChild(singleArrow);
+  if(topOverlay){
+    topOverlay.style.display = '';
+    const arrows = topOverlay.querySelectorAll('.arrow');
+    arrows.forEach(a => a.style.display = 'none');
+    let singleArrow = topOverlay.querySelector('.arrow.single');
+    if(!singleArrow){
+      singleArrow = document.createElement('div');
+      singleArrow.className = 'arrow single';
+      topOverlay.appendChild(singleArrow);
+    }
+    singleArrow.style.left = '50%';
+    singleArrow.style.display = '';
   }
-  singleArrow.style.left = '50%';
-  singleArrow.style.display = '';
 }
+
 
 /* ---------- refresh main data and render according to active tab ---------- */
 async function refreshAndRender(activeMode, activeIndex){
   const [coalDB, blend] = await Promise.all([ fetchCoalDB(), fetchBlendLatest() ]);
   window.COAL_DB = coalDB || [];
+  try { syncColorMapFromCoalDB(window.COAL_DB); } catch(e){ /* ignore */ }
   window.LATEST_BLEND = blend || null;
 
   if(!blend){
@@ -226,6 +339,7 @@ function setActiveTab(mode, index){
 }
 
 /* ---------- init and wiring ---------- */
+/* ---------- init and wiring ---------- */
 document.addEventListener('DOMContentLoaded', () => {
   // expose tooltip functions for inline handlers
   window.showCoalRectTooltip = showCoalRectTooltip;
@@ -238,13 +352,17 @@ document.addEventListener('DOMContentLoaded', () => {
       const mode = it.dataset.mode;
       const idx = (typeof it.dataset.index !== 'undefined') ? Number(it.dataset.index) : null;
       setActiveTab(mode, idx);
+      // render functions themselves toggle single-mode class, so just call refresh
       await refreshAndRender(mode, idx || 0);
     });
   });
 
   // refresh button reloads page
   const refreshBtn = document.getElementById('refreshBtn');
-  refreshBtn.addEventListener('click', () => location.reload());
+  if(refreshBtn) refreshBtn.addEventListener('click', () => location.reload());
+
+  // ensure we start without single-mode
+  try { document.body.classList.remove('single-mode'); } catch(e) {}
 
   // initial render: overview active by default
   setActiveTab('overview', null);
@@ -258,3 +376,4 @@ document.addEventListener('DOMContentLoaded', () => {
   //   refreshAndRender(mode, idx).catch(e => console.error(e));
   // }, 12000);
 });
+
