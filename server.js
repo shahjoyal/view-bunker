@@ -73,15 +73,18 @@ const BlendSchema = new mongoose.Schema({
   generation: Number,
 
   // store independent bunker info (array length 6): each has layers
-  bunkers: [{
-    layers: [{
-      rowIndex: Number,
-      coal: String,
-      percent: Number,
-      gcv: Number,
-      cost: Number
-    }]
-  }],
+// server.js — update bunkers schema to include color
+bunkers: [{
+  layers: [{
+    rowIndex: Number,
+    coal: String,
+    percent: Number,
+    gcv: Number,
+    cost: Number,
+    color: String          // <-- added
+  }]
+}],
+
 
   // computed fields
   totalFlow: { type: Number, default: 0 },
@@ -332,13 +335,16 @@ async function computeBlendMetrics(rows, flows, generation) {
       if (!pct || pct <= 0) continue;
       const coalRef = coalRefForRowAndMill(row, m);
       const coalDoc = findCoalRef(coalRef);
-      layers.push({
-        rowIndex: rIdx + 1,
-        coal: coalDoc ? coalDoc.coal : (coalRef || ''),
-        percent: Number(pct),
-        gcv: coalDoc ? (Number(coalDoc.gcv) || Number(row.gcv || 0)) : Number(row.gcv || 0),
-        cost: coalDoc ? (Number(coalDoc.cost) || Number(row.cost || 0)) : Number(row.cost || 0)
-      });
+// server.js — when building bunkers inside computeBlendMetrics()
+layers.push({
+  rowIndex: rIdx + 1,
+  coal: coalDoc ? coalDoc.coal : (coalRef || ''),
+  percent: Number(pct),
+  gcv: coalDoc ? (Number(coalDoc.gcv) || Number(row.gcv || 0)) : Number(row.gcv || 0),
+  cost: coalDoc ? (Number(coalDoc.cost) || Number(row.cost || 0)) : Number(row.cost || 0),
+  color: coalDoc ? (coalDoc.color || coalDoc.colour || null) : (row.color || null) // <-- new
+});
+
     }
     bunkers.push({ layers });
   }
