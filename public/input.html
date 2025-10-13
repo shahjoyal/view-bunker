@@ -524,6 +524,20 @@ html, body {
 
 
   </style>
+
+    <script>
+     if(localStorage.getItem('isLoggedIn') !== 'true') {
+    alert('You must login first!');
+    window.location.href = '/public/login.html'; 
+} else {
+    document.body.style.display = 'block';
+}
+    function logoutUser() {
+  localStorage.setItem('isLoggedIn', 'false'); 
+  window.location.href = '/public/login.html'; 
+}
+
+  </script>
 </head>
 <body>
   <div class="app">
@@ -1134,14 +1148,14 @@ document.addEventListener('DOMContentLoaded', () => {
 <script>
 document.addEventListener('DOMContentLoaded', () => {
   // existing wiring remains...
-  const logoutBtn = document.getElementById('logoutBtn');
-  if(logoutBtn){
-    logoutBtn.addEventListener('click', () => {
-      // simple default behaviour: navigate to /logout endpoint
-      // you can replace this with any logout API call you prefer
-      location.href = '/logout';
-    });
-  }
+  // const logoutBtn = document.getElementById('logoutBtn');
+  // if(logoutBtn){
+  //   logoutBtn.addEventListener('click', () => {
+  //     // simple default behaviour: navigate to /logout endpoint
+  //     // you can replace this with any logout API call you prefer
+  //     location.href = '/logout';
+  //   });
+  // }
 
   // Make sure refresh button doesn't create additional page scroll and triggers the refresh action already coded:
   const refreshBtn = document.getElementById('refreshBtn');
@@ -1169,3 +1183,4 @@ document.addEventListener('DOMContentLoaded', () => {
 
 </body>
 </html>
+
