@@ -176,7 +176,18 @@ function renderBunkerIntoSVG(svg, bunkerData, coalDB, bunkerIndex = 0, strokeOpe
 
   // layers expected bottom->top
   const layers = Array.isArray(bunkerData && bunkerData.layers) ? bunkerData.layers.slice() : [];
-  const filtered = layers.map(l => ({ coal: l.coal || '', percent: safeNum(l.percent) || 0, gcv: safeNum(l.gcv), cost: safeNum(l.cost), rowIndex: l.rowIndex || null })).filter(l => l.percent > 0);
+// patched: propagate color from layer if present
+const filtered = layers
+  .map(l => ({
+    coal: l.coal || '',
+    percent: safeNum(l.percent) || 0,
+    gcv: safeNum(l.gcv),
+    cost: safeNum(l.cost),
+    rowIndex: (typeof l.rowIndex !== 'undefined' && l.rowIndex !== null) ? l.rowIndex : null,
+    color: (typeof l.color !== 'undefined' && l.color !== null) ? String(l.color) : null  // <- NEW
+  }))
+  .filter(l => l.percent > 0);
+
 
   // --- reverse display order so the first layer in data renders last (top) ---
   filtered.reverse();
@@ -198,7 +209,9 @@ function renderBunkerIntoSVG(svg, bunkerData, coalDB, bunkerIndex = 0, strokeOpe
     const pct = Math.max(0, Math.min(100, filtered[i].percent));
     const h = (pct / 100) * usableH;
     const y = bottomY - (cum + h);
-    const color = findCoalColor(filtered[i].coal, coalDB) || DEFAULT_COAL_COLORS[i % DEFAULT_COAL_COLORS.length];
+    // patched: prefer layer.color, then DB color, then default palette
+const color = filtered[i].color || findCoalColor(filtered[i].coal, coalDB) || DEFAULT_COAL_COLORS[i % DEFAULT_COAL_COLORS.length];
+
 
     // JSON-escape for attribute
     const layerJson = JSON.stringify(filtered[i]).replace(/"/g,'&quot;');
