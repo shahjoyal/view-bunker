@@ -985,7 +985,7 @@ html, body {
 
   function buildFilteredLayers(bdata){
     const layers = Array.isArray(bdata && bdata.layers) ? bdata.layers.slice() : [];
-    const filtered = layers.map(l => ({ coal: l.coal || '', percent: (l.percent === undefined || l.percent === null) ? (l.percentages ? l.percentages : 0) : l.percent, gcv: (l.gcv !== undefined && l.gcv !== null) ? Number(l.gcv) : null, cost: (l.cost !== undefined && l.cost !== null) ? Number(l.cost) : null, rowIndex: (typeof l.rowIndex !== 'undefined') ? l.rowIndex : (typeof l.row !== 'undefined' ? l.row : null) }));
+ 
     const norm = filtered.map(f => { let pct = 0; if(Array.isArray(f.percent) && f.percent.length) pct = Number(f.percent[0]) || 0; else pct = Number(f.percent) || 0; return Object.assign({}, f, { percent: pct }); }).filter(l => l.percent > 0);
     norm.reverse(); norm.reverse(); return norm;
   }
