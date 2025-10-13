@@ -19,7 +19,7 @@ app.use(express.static(path.join(__dirname)));
 
 // Root route returning your input.html in public/
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, '/public/input.html'));
+  res.sendFile(path.join(__dirname, '/public/login.html'));
 });
 
 const MONGO_URI = process.env.MONGO_URI;
@@ -522,3 +522,4 @@ app.get('/api/coal/count', async (req, res) => {
 /* -------------------- Start server -------------------- */
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server listening on ${PORT}`));
+
