@@ -522,6 +522,29 @@ html, body {
   }
 }
 
+/* ---------- Option B (scale-to-fit, no horizontal scroll) ---------- */
+.bunkers-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+  gap: 12px;
+  align-items: end;
+  width: 100%;
+}
+
+/* ensure we try to keep 8 columns on larger screens */
+@media (min-width: 1300px) {
+  .bunkers-grid { grid-template-columns: repeat(8, 1fr); }
+}
+
+/* arrow centered inside each bunker */
+.bunker .arrow,
+.bunker > .arrow {
+  left: 50%;
+  transform: translateX(-50%);
+  position: absolute;
+  top: calc(var(--bunker-top-line-distance) + 4px);
+}
+
 
   </style>
 
@@ -670,7 +693,7 @@ html, body {
                   </div>
                 </div>
                 <div class="coal-flow-wrap">
-                 <div class="coal-flow-title">Additional Row</div>
+                 <div class="coal-flow-title">Next Coal Batch Estimated Generation(MW) </div>
                  <div class="coal-flow-grid" id="extraRowGrid">
                   <div class="coal-box" id="extraRowBox-0" data-bunker="0"><div class="value">--</div><div class="label">Coal Mill A</div></div>
                   <div class="coal-box" id="extraRowBox-1" data-bunker="1"><div class="value">--</div><div class="label">Coal Mill B</div></div>
@@ -1289,6 +1312,446 @@ document.addEventListener('DOMContentLoaded', () => {
   const sc = document.querySelector('.stats-column');
   if (sc) sc.style.display = sc.style.display || 'block';
 });
+</script>
+<!-- <script>
+/* Next Coal Batch Estimated Generation (uses GCV of the coal above the bottom-draining layer) */
+(function(){
+  const BUNKER_COUNT = 8;
+  const BOX_PREFIX = 'extraRowBox-';
+  const UPDATE_MS = 1000;
+
+  function extractNumber(v){
+    if(v === null || typeof v === 'undefined') return null;
+    if(typeof v === 'number') return v;
+    if(typeof v === 'string' && v.trim() !== ''){
+      const n = Number(String(v).replace(/,/g,''));
+      return Number.isFinite(n) ? n : null;
+    }
+    if(typeof v === 'object'){
+      if(v.$numberInt) return Number(v.$numberInt);
+      if(v.$numberDouble) return Number(v.$numberDouble);
+      if(v.$numberLong) return Number(v.$numberLong);
+      if(v.$date) return Number(v.$date);
+      try{
+        const s = JSON.stringify(v);
+        const m = s.match(/-?\d+(\.\d+)?/);
+        if(m) { const n = Number(m[0]); return Number.isFinite(n) ? n : null; }
+      }catch(e){}
+    }
+    return null;
+  }
+
+  function getFlows(blend){
+    if(Array.isArray(blend && blend.flows)) return blend.flows;
+    if(Array.isArray(window.flows)) return window.flows;
+    if(Array.isArray(window.__flowsFromBinder)) return window.__flowsFromBinder;
+    return [];
+  }
+
+  // same function as in estimatedGenerationBinder (keeps ordering consistent)
+  function buildRowIndexSeqForBunker(blend, bunkerIndex){
+    const seq = [];
+    if(!blend || !Array.isArray(blend.rows)) return seq;
+    for(let r = blend.rows.length - 1; r >= 0; r--){
+      const row = blend.rows[r];
+      let p = null;
+      if(Array.isArray(row.percentages) && row.percentages.length > bunkerIndex){
+        p = extractNumber(row.percentages[bunkerIndex]);
+      } else if(typeof row.percent === 'number' && bunkerIndex === 0){
+        p = extractNumber(row.percent);
+      } else if(row.percent){
+        p = extractNumber(row.percent);
+      }
+      if(p !== null && p !== 0) seq.push(r);
+    }
+    return seq;
+  }
+
+  function readHeatRate(blend){
+    const el = document.getElementById('HEATRATE');
+    if(el){
+      const txt = (el.value !== undefined && el.value !== null) ? el.value : (el.textContent || el.innerText || '');
+      const nn = extractNumber(txt);
+      if(nn !== null) return nn;
+    }
+    return extractNumber(blend && blend.heatRate);
+  }
+
+  // Try to pull GCV for a specific rowIndex for a bunker b:
+  // - Prefer per-bunker layer gcv if a layer references this rowIndex (and has percent>0)
+  // - Then try coal mapping in row.coal -> COAL_DB
+  // - Fallback to blend.rows[rowIndex].gcv
+  function findGcvForRow(blend, bunkerIndex, rowIndex){
+    if(rowIndex === null || typeof rowIndex === 'undefined') return null;
+    const coalDB = window.COAL_DB || [];
+    try {
+      // 1) per-bunker layers
+      if (Array.isArray(blend.bunkers) && blend.bunkers[bunkerIndex] && Array.isArray(blend.bunkers[bunkerIndex].layers)){
+        const layers = blend.bunkers[bunkerIndex].layers;
+        for (let li = 0; li < layers.length; li++){
+          const L = layers[li];
+          if(!L) continue;
+          const Lrow = (typeof L.rowIndex !== 'undefined' && L.rowIndex !== null) ? L.rowIndex : (typeof L.row !== 'undefined' ? L.row : null);
+          // consider only layers referencing the target rowIndex and with positive percent
+          let rawPct = (L.percent === undefined || L.percent === null) ? (L.percentages ? L.percentages : 0) : L.percent;
+          let pctVal = (Array.isArray(rawPct) && rawPct.length) ? extractNumber(rawPct[0]) : extractNumber(rawPct);
+          if(Lrow === rowIndex && pctVal && pctVal > 0){
+            const gcvL = extractNumber(L.gcv);
+            if(gcvL !== null) return gcvL;
+            if(L.coal){
+              const keyLower = String(L.coal || '').trim().toLowerCase();
+              const found = coalDB.find(c => {
+                if(!c) return false;
+                if(c.coal && String(c.coal).trim().toLowerCase() === keyLower) return true;
+                if(c.name && String(c.name).trim().toLowerCase() === keyLower) return true;
+                if((c._id || c.id) && String(c._id || c.id) === String(L.coal)) return true;
+                return false;
+              });
+              if(found) return extractNumber(found.gcv);
+            }
+          }
+        }
+      }
+    } catch(e) { /* ignore and fallback */ }
+
+    // 2) check if row.coal maps to a coal entry (row.coal could e.g. be an object per-mill)
+    if(Array.isArray(blend.rows) && blend.rows[rowIndex]){
+      try{
+        const row = blend.rows[rowIndex];
+        if (row && row.coal && typeof row.coal === 'object' && row.coal[String(bunkerIndex)]){
+          const ref = row.coal[String(bunkerIndex)];
+          const keyLower = String(ref || '').trim().toLowerCase();
+          const found = coalDB.find(c => {
+            if(!c) return false;
+            if(c.coal && String(c.coal).trim().toLowerCase() === keyLower) return true;
+            if(c.name && String(c.name).trim().toLowerCase() === keyLower) return true;
+            if((c._id || c.id) && String(c._id || c.id) === String(ref)) return true;
+            return false;
+          });
+          if(found) return extractNumber(found.gcv);
+        }
+      }catch(e){}
+    }
+
+    // 3) fallback to global row gcv
+    if(Array.isArray(blend.rows) && blend.rows[rowIndex]){
+      return extractNumber(blend.rows[rowIndex].gcv);
+    }
+    return null;
+  }
+
+  function updateOnce(){
+    const blend = window.LATEST_BLEND || {};
+    const flows = getFlows(blend);
+    const heatRate = readHeatRate(blend);
+
+    for(let b = 0; b < BUNKER_COUNT; b++){
+      const box = document.getElementById(BOX_PREFIX + b);
+      const valEl = box ? box.querySelector('.value') : null;
+      const rawFlow = Array.isArray(flows) ? flows[b] : null;
+      const flowVal = extractNumber(rawFlow);
+
+      // build seq and determine which row is currently draining
+      const seq = buildRowIndexSeqForBunker(blend, b); // array of row indices (order consistent with est binder)
+      let currentSeqIdx = null;
+      if(window.nextBlendBinder && Array.isArray(window.nextBlendBinder.state)){
+        const st = window.nextBlendBinder.state[b];
+        if(st && Array.isArray(st.sequence)){
+          currentSeqIdx = (typeof st.idx === 'number') ? st.idx : 0;
+          // clamp
+          if(currentSeqIdx < 0) currentSeqIdx = 0;
+          if(currentSeqIdx >= seq.length) currentSeqIdx = seq.length - 1;
+        }
+      } else {
+        // default: bottomScan means seq[0] is the active (as estimatedGenerationBinder uses)
+        if(seq.length > 0) currentSeqIdx = 0;
+      }
+
+      // chosen row for currently draining (mirrors estimatedGenerationBinder behavior)
+      const chosenRowIndex = (Array.isArray(seq) && typeof currentSeqIdx === 'number' && seq.length > currentSeqIdx) ? seq[currentSeqIdx] : null;
+
+      // NOW pick the "above" row: the next item in seq (index + 1)
+      let aboveRowIndex = null;
+      if(Array.isArray(seq) && typeof currentSeqIdx === 'number'){
+        const aboveIdx = currentSeqIdx + 1;
+        if(aboveIdx >= 0 && aboveIdx < seq.length){
+          aboveRowIndex = seq[aboveIdx];
+        } else {
+          // no above row in the seq (top of stack) => leave null (shows --)
+          aboveRowIndex = null;
+        }
+      }
+
+      // find GCV for the above row
+      const gcv = (aboveRowIndex !== null) ? findGcvForRow(blend, b, aboveRowIndex) : null;
+
+      let computedMw = null;
+      if (flowVal !== null && flowVal > 0 && gcv !== null && typeof heatRate === 'number' && heatRate > 0){
+        computedMw = (Number(flowVal) * Number(gcv)) / Number(heatRate);
+      }
+
+      if(valEl){
+        valEl.innerText = (computedMw === null) ? '--' : (Number.isFinite(computedMw) ? computedMw.toFixed(2) : '--');
+      }
+    }
+  }
+
+  let __timer = null;
+  function start(){
+    if(__timer) return;
+    updateOnce();
+    __timer = setInterval(updateOnce, UPDATE_MS);
+    window.addEventListener('flows:update', updateOnce);
+    window.addEventListener('blend:updated', updateOnce);
+    // also react when nextBlendBinder state changes (if binder exists it updates its own state)
+    if(window.nextBlendBinder && Array.isArray(window.nextBlendBinder.state)){
+      // attempt to poll that state changes will trigger flows:update or blend:updated already.
+      // but also add listener for a custom event if your app dispatches one.
+      window.addEventListener('nextBlend:state', updateOnce, false);
+    }
+  }
+  function stop(){
+    if(__timer){ clearInterval(__timer); __timer = null; }
+    window.removeEventListener('flows:update', updateOnce);
+    window.removeEventListener('blend:updated', updateOnce);
+    window.removeEventListener('nextBlend:state', updateOnce);
+  }
+
+  window.nextBatchEstimatedGenerationBinder = { start, stop, update: updateOnce };
+  document.addEventListener('DOMContentLoaded', () => setTimeout(start, 700));
+})();
+</script> -->
+<script>
+/* Next Coal Batch Estimated Generation — use GCV of the layer just ABOVE the bottom-most (second-last) */
+(function(){
+  const BUNKER_COUNT = 8;
+  const BOX_PREFIX = 'extraRowBox-';
+  const UPDATE_MS = 1000;
+
+  function extractNumber(v){
+    if(v === null || typeof v === 'undefined') return null;
+    if(typeof v === 'number') return v;
+    if(typeof v === 'string' && v.trim() !== ''){
+      const n = Number(String(v).replace(/,/g,''));
+      return Number.isFinite(n) ? n : null;
+    }
+    if(typeof v === 'object'){
+      if(v.$numberInt) return Number(v.$numberInt);
+      if(v.$numberDouble) return Number(v.$numberDouble);
+      if(v.$numberLong) return Number(v.$numberLong);
+      if(v.$date) return Number(v.$date);
+      try{
+        const s = JSON.stringify(v);
+        const m = s.match(/-?\d+(\.\d+)?/);
+        if(m) { const n = Number(m[0]); return Number.isFinite(n) ? n : null; }
+      }catch(e){}
+    }
+    return null;
+  }
+
+  function getFlows(blend){
+    if(Array.isArray(blend && blend.flows)) return blend.flows;
+    if(Array.isArray(window.flows)) return window.flows;
+    if(Array.isArray(window.__flowsFromBinder)) return window.__flowsFromBinder;
+    return [];
+  }
+
+  // Resolve GCV for a row index (same fallback order as before)
+  function findGcvForRow(blend, bunkerIndex, rowIndex){
+    if(rowIndex === null || typeof rowIndex === 'undefined') return null;
+    const coalDB = window.COAL_DB || [];
+    try {
+      if (Array.isArray(blend.bunkers) && blend.bunkers[bunkerIndex] && Array.isArray(blend.bunkers[bunkerIndex].layers)){
+        const layers = blend.bunkers[bunkerIndex].layers;
+        for (let li = 0; li < layers.length; li++){
+          const L = layers[li];
+          if(!L) continue;
+          const Lrow = (typeof L.rowIndex !== 'undefined' && L.rowIndex !== null) ? L.rowIndex : (typeof L.row !== 'undefined' ? L.row : null);
+          let rawPct = (L.percent === undefined || L.percent === null) ? (L.percentages ? L.percentages : 0) : L.percent;
+          let pctVal = (Array.isArray(rawPct) && rawPct.length) ? extractNumber(rawPct[0]) : extractNumber(rawPct);
+          if(Lrow === rowIndex && pctVal && pctVal > 0){
+            const gcvL = extractNumber(L.gcv);
+            if(gcvL !== null) return gcvL;
+            if(L.coal){
+              const keyLower = String(L.coal || '').trim().toLowerCase();
+              const found = coalDB.find(c => {
+                if(!c) return false;
+                if(c.coal && String(c.coal).trim().toLowerCase() === keyLower) return true;
+                if(c.name && String(c.name).trim().toLowerCase() === keyLower) return true;
+                if((c._id || c.id) && String(c._id || c.id) === String(L.coal)) return true;
+                return false;
+              });
+              if(found) return extractNumber(found.gcv);
+            }
+          }
+        }
+      }
+    } catch(e) { /* ignore and fallback */ }
+
+    // row.coal -> COAL_DB
+    if(Array.isArray(blend.rows) && blend.rows[rowIndex]){
+      try{
+        const row = blend.rows[rowIndex];
+        if (row && row.coal && typeof row.coal === 'object' && row.coal[String(bunkerIndex)]){
+          const ref = row.coal[String(bunkerIndex)];
+          const keyLower = String(ref || '').trim().toLowerCase();
+          const found = coalDB.find(c => {
+            if(!c) return false;
+            if(c.coal && String(c.coal).trim().toLowerCase() === keyLower) return true;
+            if(c.name && String(c.name).trim().toLowerCase() === keyLower) return true;
+            if((c._id || c.id) && String(c._id || c.id) === String(ref)) return true;
+            return false;
+          });
+          if(found) return extractNumber(found.gcv);
+        }
+      }catch(e){}
+    }
+
+    // fallback to blend.rows[rowIndex].gcv
+    if(Array.isArray(blend.rows) && blend.rows[rowIndex]){
+      return extractNumber(blend.rows[rowIndex].gcv);
+    }
+    return null;
+  }
+
+  // Primary: determine the rowIndex of the layer just above the bottom-most visible layer, using bunker.layers
+  function getAboveRowIndexFromLayers(blend, bunkerIndex){
+    try{
+      const b = (Array.isArray(blend.bunkers) ? blend.bunkers[bunkerIndex] : null);
+      if(!b || !Array.isArray(b.layers) || b.layers.length === 0) return null;
+      // iterate from last -> first to find bottom-most active layer (same approach used by your existing code)
+      for(let i = b.layers.length - 1; i >= 0; i--){
+        const layer = b.layers[i];
+        if(!layer) continue;
+        let rawPct = (layer.percent === undefined || layer.percent === null) ? (layer.percentages ? layer.percentages : 0) : layer.percent;
+        let pct = (Array.isArray(rawPct) && rawPct.length) ? extractNumber(rawPct[0]) : extractNumber(rawPct);
+        if(pct && pct > 0){
+          const aboveIdx = i - 1; // layer just above bottom-most
+          if(aboveIdx >= 0){
+            const L2 = b.layers[aboveIdx];
+            if(!L2) return null;
+            if(typeof L2.rowIndex !== 'undefined' && L2.rowIndex !== null) return L2.rowIndex;
+            if(typeof L2.row !== 'undefined' && L2.row !== null) return L2.row;
+            // if no explicit row ref, try to resolve by coal name via COAL_DB matching (if present)
+            if(L2.coal){
+              const coalDB = window.COAL_DB || [];
+              const key = String(L2.coal || '').trim().toLowerCase();
+              const found = coalDB.find(c => c && ((c.coal && String(c.coal).trim().toLowerCase() === key) || (c.name && String(c.name).trim().toLowerCase() === key) || (String(c._id||c.id) === String(L2.coal))));
+              if(found && typeof found._rowIndex !== 'undefined') return found._rowIndex; // only if you have such mapping
+            }
+          }
+          return null; // bottom existed but nothing above it
+        }
+      }
+    }catch(e){}
+    return null;
+  }
+
+  // Fallback: pick the row just above the currently draining row using nextBlendBinder.state or seq ordering
+  function getAboveRowIndexFromSeq(blend, bunkerIndex){
+    const seq = (function(){
+      if(!blend || !Array.isArray(blend.rows)) return [];
+      const s = [];
+      for(let r = blend.rows.length - 1; r >= 0; r--){
+        const row = blend.rows[r];
+        let p = null;
+        if(Array.isArray(row.percentages) && row.percentages.length > bunkerIndex){
+          p = extractNumber(row.percentages[bunkerIndex]);
+        } else if(typeof row.percent === 'number' && bunkerIndex === 0){
+          p = extractNumber(row.percent);
+        } else if(row.percent){
+          p = extractNumber(row.percent);
+        }
+        if(p !== null && p !== 0) s.push(r);
+      }
+      return s;
+    })();
+
+    if(window.nextBlendBinder && Array.isArray(window.nextBlendBinder.state)){
+      const st = window.nextBlendBinder.state[bunkerIndex];
+      if(st && Array.isArray(st.sequence)){
+        // st.idx points to the currently draining layer in st.sequence. We want the next one above it.
+        const idx = (typeof st.idx === 'number') ? st.idx : 0;
+        const aboveIdx = idx + 1;
+        if(Array.isArray(st.sequence) && aboveIdx >=0 && aboveIdx < st.sequence.length){
+          // st.sequence may be seconds-per-layer, not row indices; try to map via 'seq' computed above
+          if(Array.isArray(seq) && seq.length === st.sequence.length){
+            return seq[aboveIdx];
+          } else {
+            // if sequences length mismatch, try to use seq[aboveIdx] directly (best-effort)
+            if(Array.isArray(seq) && aboveIdx >=0 && aboveIdx < seq.length) return seq[aboveIdx];
+          }
+        }
+      }
+    }
+
+    // fallback: if seq has at least 2 items, pick seq[1] (one above bottom-most)
+    if(Array.isArray(seq) && seq.length > 1) return seq[1];
+    return null;
+  }
+
+  function readHeatRate(blend){
+    const el = document.getElementById('HEATRATE');
+    if(el){
+      const txt = (el.value !== undefined && el.value !== null) ? el.value : (el.textContent || el.innerText || '');
+      const nn = extractNumber(txt);
+      if(nn !== null) return nn;
+    }
+    return extractNumber(blend && blend.heatRate);
+  }
+
+  function updateOnce(){
+    const blend = window.LATEST_BLEND || {};
+    const flows = getFlows(blend);
+    const heatRate = readHeatRate(blend);
+
+    for(let b = 0; b < BUNKER_COUNT; b++){
+      const box = document.getElementById(BOX_PREFIX + b);
+      const valEl = box ? box.querySelector('.value') : null;
+      const rawFlow = Array.isArray(flows) ? flows[b] : null;
+      const flowVal = extractNumber(rawFlow);
+
+      // 1) primary - try to get above-row index from bunker.layers (most reliable)
+      let aboveRowIndex = getAboveRowIndexFromLayers(blend, b);
+
+      // 2) fallback - try seq-based approach
+      if(aboveRowIndex === null) aboveRowIndex = getAboveRowIndexFromSeq(blend, b);
+
+      // find GCV for that above row
+      const gcv = (aboveRowIndex !== null) ? findGcvForRow(blend, b, aboveRowIndex) : null;
+
+      // compute MW: (flow (TPH) * gcv) / heatRate
+      let computedMw = null;
+      if (flowVal !== null && flowVal > 0 && gcv !== null && typeof heatRate === 'number' && heatRate > 0){
+        computedMw = (Number(flowVal) * Number(gcv)) / Number(heatRate);
+      }
+
+      if(valEl){
+        valEl.innerText = (computedMw === null) ? '--' : (Number.isFinite(computedMw) ? computedMw.toFixed(2) : '--');
+      }
+      // console.debug('nextBatch', b, { aboveRowIndex, gcv, flowVal, heatRate, computedMw });
+    }
+  }
+
+  let __timer = null;
+  function start(){
+    if(__timer) return;
+    updateOnce();
+    __timer = setInterval(updateOnce, UPDATE_MS);
+    window.addEventListener('flows:update', updateOnce);
+    window.addEventListener('blend:updated', updateOnce);
+    window.addEventListener('nextBlend:state', updateOnce, false);
+  }
+  function stop(){
+    if(__timer){ clearInterval(__timer); __timer = null; }
+    window.removeEventListener('flows:update', updateOnce);
+    window.removeEventListener('blend:updated', updateOnce);
+    window.removeEventListener('nextBlend:state', updateOnce);
+  }
+
+  window.nextBatchEstimatedGenerationBinder = { start, stop, update: updateOnce };
+  document.addEventListener('DOMContentLoaded', () => setTimeout(start, 700));
+})();
 </script>
 
 </body>
