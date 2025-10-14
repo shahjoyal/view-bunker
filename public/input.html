@@ -949,7 +949,27 @@ html, body {
 
   function readHeatRate(blend){ const el = (typeof document !== 'undefined' && document.getElementById) ? document.getElementById('HEATRATE') : null; if(el){ const txt = (el.value !== undefined && el.value !== null) ? el.value : (el.textContent || el.innerText || ''); const nn = extractNumber(txt); if(nn !== null) return nn; } return extractNumber(blend && blend.heatRate); }
 
-  function getRowIndexFromBunkerLayers(blend, bunkerIndex){ try{ if(!blend || !Array.isArray(blend.bunkers)) return null; const b = blend.bunkers[bunkerIndex]; if(!b || !Array.isArray(b.layers) || b.layers.length === 0) return null; const layer = b.layers[0]; if(layer && (layer.rowIndex !== undefined || layer.rowIndex !== null)) return layer.rowIndex; if(layer && layer.row !== undefined) return layer.row; }catch(e){} return null; }
+  // function getRowIndexFromBunkerLayers(blend, bunkerIndex){ try{ if(!blend || !Array.isArray(blend.bunkers)) return null; const b = blend.bunkers[bunkerIndex]; if(!b || !Array.isArray(b.layers) || b.layers.length === 0) return null; const layer = b.layers[0]; if(layer && (layer.rowIndex !== undefined || layer.rowIndex !== null)) return layer.rowIndex; if(layer && layer.row !== undefined) return layer.row; }catch(e){} return null; }
+  function getRowIndexFromBunkerLayers(blend, bunkerIndex){
+  try{
+    const b = (Array.isArray(blend.bunkers) ? blend.bunkers[bunkerIndex] : null);
+    if(!b || !Array.isArray(b.layers) || b.layers.length === 0) return null;
+
+    // iterate bottom-to-top so we prefer the bottom-most visible/active layer
+    for(let i = b.layers.length - 1; i >= 0; i--){
+      const layer = b.layers[i];
+      if(!layer) continue;
+      // robust percent extraction (handles percent vs percentages array)
+      let rawPct = (layer.percent === undefined || layer.percent === null) ? (layer.percentages ? layer.percentages : 0) : layer.percent;
+      let pct = (Array.isArray(rawPct) && rawPct.length) ? Number(rawPct[0]) || 0 : Number(rawPct) || 0;
+      if(pct > 0){
+        if(layer.rowIndex !== undefined && layer.rowIndex !== null) return layer.rowIndex;
+        if(layer.row !== undefined && layer.row !== null) return layer.row;
+      }
+    }
+  }catch(e){}
+  return null;
+}
 
   function updateOnce(){
     const blend = window.LATEST_BLEND || {};
@@ -971,10 +991,80 @@ html, body {
       }
       if(chosenRowIndex === null){ const rFromLayers = getRowIndexFromBunkerLayers(blend, b); if(rFromLayers !== null && rFromLayers !== undefined) { chosenRowIndex = rFromLayers; chosenBy = 'bunkerLayers'; } }
       if(chosenRowIndex === null){ if(Array.isArray(seq) && seq.length > 0){ chosenRowIndex = seq[0]; chosenBy = 'bottomScan'; } }
-      const gcv = (chosenRowIndex !== null && Array.isArray(blend.rows) && blend.rows[chosenRowIndex]) ? extractNumber(blend.rows[chosenRowIndex].gcv) : null;
-      let computedMw = null;
-      if(flowVal !== null && flowVal > 0 && gcv !== null && typeof heatRate === 'number' && heatRate > 0){ computedMw = (Number(flowVal) * Number(gcv)) / Number(heatRate); }
-      if(valEl){ valEl.innerText = (computedMw === null) ? '--' : (Number.isFinite(computedMw) ? computedMw.toFixed(2) : '--'); }
+      // const gcv = (chosenRowIndex !== null && Array.isArray(blend.rows) && blend.rows[chosenRowIndex]) ? extractNumber(blend.rows[chosenRowIndex].gcv) : null;
+      // let computedMw = null;
+      // if(flowVal !== null && flowVal > 0 && gcv !== null && typeof heatRate === 'number' && heatRate > 0){ computedMw = (Number(flowVal) * Number(gcv)) / Number(heatRate); }
+      // if(valEl){ valEl.innerText = (computedMw === null) ? '--' : (Number.isFinite(computedMw) ? computedMw.toFixed(2) : '--'); }
+// --- compute GCV for this bunker (prefer per-bunker layer GCV, then per-mill row mapping, then fallback) ---
+let gcv = null;
+const coalDB = window.COAL_DB || [];
+
+// 1) prefer bottom-most visible layer GCV from blend.bunkers[b].layers (if present)
+try {
+  if (Array.isArray(blend.bunkers) && blend.bunkers[b] && Array.isArray(blend.bunkers[b].layers)) {
+    const layers = blend.bunkers[b].layers;
+    // iterate bottom-to-top so we pick the layer that is currently draining
+    for (let li = layers.length - 1; li >= 0; li--) {
+      const L = layers[li];
+      // percent handling (same approach as buildFilteredLayers)
+      let rawPct = (L.percent === undefined || L.percent === null) ? (L.percentages ? L.percentages : 0) : L.percent;
+      let pctVal = (Array.isArray(rawPct) && rawPct.length) ? extractNumber(rawPct[0]) : extractNumber(rawPct);
+      if (pctVal && pctVal > 0) {
+        gcv = extractNumber(L.gcv);
+        if (gcv === null && L.coal) {
+          // try to find coal in DB (match by name or id-like)
+          const keyLower = String(L.coal || '').trim().toLowerCase();
+          const found = coalDB.find(c => {
+            if (!c) return false;
+            if (c.coal && String(c.coal).trim().toLowerCase() === keyLower) return true;
+            if (c.name && String(c.name).trim().toLowerCase() === keyLower) return true;
+            if ((c._id || c.id) && String(c._id || c.id) === String(L.coal)) return true;
+            return false;
+          });
+          if (found) gcv = extractNumber(found.gcv);
+        }
+        if (gcv !== null) break;
+      }
+    }
+  }
+} catch (e) { /* ignore and fallthrough to next options */ }
+
+// 2) if still null, check if the selected row has a per-mill coal mapping (row.coal may be object)
+if (gcv === null && chosenRowIndex !== null && Array.isArray(blend.rows) && blend.rows[chosenRowIndex]) {
+  try {
+    const row = blend.rows[chosenRowIndex];
+    if (row && row.coal && typeof row.coal === 'object' && row.coal[String(b)]) {
+      const ref = row.coal[String(b)];
+      // find in coalDB by name or id
+      const keyLower = String(ref || '').trim().toLowerCase();
+      const found = coalDB.find(c => {
+        if (!c) return false;
+        if (c.coal && String(c.coal).trim().toLowerCase() === keyLower) return true;
+        if (c.name && String(c.name).trim().toLowerCase() === keyLower) return true;
+        if ((c._id || c.id) && String(c._id || c.id) === String(ref)) return true;
+        return false;
+      });
+      if (found) gcv = extractNumber(found.gcv);
+    }
+  } catch (e) { /* ignore */ }
+}
+
+// 3) fallback to the global row gcv
+if (gcv === null && chosenRowIndex !== null && Array.isArray(blend.rows) && blend.rows[chosenRowIndex]) {
+  gcv = extractNumber(blend.rows[chosenRowIndex].gcv);
+}
+
+// 4) compute
+let computedMw = null;
+if (flowVal !== null && flowVal > 0 && gcv !== null && typeof heatRate === 'number' && heatRate > 0) {
+  computedMw = (Number(flowVal) * Number(gcv)) / Number(heatRate);
+}
+if (valEl) {
+  valEl.innerText = (computedMw === null) ? '--' : (Number.isFinite(computedMw) ? computedMw.toFixed(2) : '--');
+}
+
+  
+  
     }
   }
 
@@ -997,12 +1087,29 @@ html, body {
   const findColor = (typeof findCoalColor === 'function') ? findCoalColor : function(){ return null; };
   const FALLBACK_COLORS = (typeof DEFAULT_COAL_COLORS !== 'undefined') ? DEFAULT_COAL_COLORS : ["#f39c12","#3498db","#2ecc71","#ef4444","#8b5cf6","#14b8a6","#f97316","#06b6d4"];
 
+  // function buildFilteredLayers(bdata){
+  //   const layers = Array.isArray(bdata && bdata.layers) ? bdata.layers.slice() : [];
+  //   const filtered = layers.map(l => ({ coal: l.coal || '', percent: (l.percent === undefined || l.percent === null) ? (l.percentages ? l.percentages : 0) : l.percent, gcv: (l.gcv !== undefined && l.gcv !== null) ? Number(l.gcv) : null, cost: (l.cost !== undefined && l.cost !== null) ? Number(l.cost) : null, rowIndex: (typeof l.rowIndex !== 'undefined') ? l.rowIndex : (typeof l.row !== 'undefined' ? l.row : null) })); 
+  //   const norm = filtered.map(f => { let pct = 0; if(Array.isArray(f.percent) && f.percent.length) pct = Number(f.percent[0]) || 0; else pct = Number(f.percent) || 0; return Object.assign({}, f, { percent: pct }); }).filter(l => l.percent > 0);
+  //   norm.reverse(); norm.reverse(); return norm;
+  // }
+
   function buildFilteredLayers(bdata){
-    const layers = Array.isArray(bdata && bdata.layers) ? bdata.layers.slice() : [];
- 
-    const norm = filtered.map(f => { let pct = 0; if(Array.isArray(f.percent) && f.percent.length) pct = Number(f.percent[0]) || 0; else pct = Number(f.percent) || 0; return Object.assign({}, f, { percent: pct }); }).filter(l => l.percent > 0);
-    norm.reverse(); norm.reverse(); return norm;
-  }
+  const layers = Array.isArray(bdata && bdata.layers) ? bdata.layers.slice() : [];
+  const filtered = layers.map(l => ({
+    coal: l.coal || '',
+    percent: (l.percent === undefined || l.percent === null) ? (l.percentages ? l.percentages : 0) : l.percent,
+    gcv: (l.gcv !== undefined && l.gcv !== null) ? Number(l.gcv) : null,
+    cost: (l.cost !== undefined && l.cost !== null) ? Number(l.cost) : null,
+    rowIndex: (typeof l.rowIndex !== 'undefined') ? l.rowIndex : (typeof l.row !== 'undefined' ? l.row : null),
+    color: (typeof l.color !== 'undefined' && l.color !== null && String(l.color).trim() !== '') 
+             ? String(l.color) 
+             : (typeof findCoalColor === 'function' ? findCoalColor(l.coal, window.COAL_DB || []) : null)
+  })); 
+  const norm = filtered.map(f => { let pct = 0; if(Array.isArray(f.percent) && f.percent.length) pct = Number(f.percent[0]) || 0; else pct = Number(f.percent) || 0; return Object.assign({}, f, { percent: pct }); }).filter(l => l.percent > 0);
+  norm.reverse(); norm.reverse(); return norm;
+}
+
 
   function getNextBlendStateFor(b){ if(window.nextBlendBinder && Array.isArray(window.nextBlendBinder.state)){ return window.nextBlendBinder.state[b] || null; } return null; }
 
@@ -1046,7 +1153,10 @@ html, body {
         const item = filteredTopToBottom[topIdx];
         const visibleH = visibleTop[topIdx] || 0;
         const y = bottomY - ((suffixSum[topIdx] || 0) + visibleH);
-        const color = findColor(item.coal, coalDB) || FALLBACK_COLORS[topIdx % FALLBACK_COLORS.length];
+        // const color = findColor(item.coal, coalDB) || FALLBACK_COLORS[topIdx % FALLBACK_COLORS.length];
+        const color = (item.color && String(item.color).trim())
+            ? String(item.color)
+            : (findColor(item.coal, coalDB) || FALLBACK_COLORS[topIdx % FALLBACK_COLORS.length]);
         const layerJson = JSON.stringify({ coal: item.coal, percent: item.percent, gcv: item.gcv, cost: item.cost }).replace(/"/g,'&quot;');
         inner += `<g clip-path="url(#${clipId})">` + `<rect x="10" y="${y}" width="80" height="${visibleH}" fill="${color}" data-row="${item.rowIndex}" data-mill="${b}" data-pct="${item.percent}" ` + `onmouseenter="window.showCoalRectTooltip && window.showCoalRectTooltip(event, ${item.rowIndex || 0}, ${b}, ${layerJson})" ` + `onmousemove="window.moveCoalRectTooltip && window.moveCoalRectTooltip(event)" ` + `onmouseleave="window.hideCoalRectTooltip && window.hideCoalRectTooltip()" />` + `</g>`;
       }
@@ -1153,7 +1263,7 @@ document.addEventListener('DOMContentLoaded', () => {
   //   logoutBtn.addEventListener('click', () => {
   //     // simple default behaviour: navigate to /logout endpoint
   //     // you can replace this with any logout API call you prefer
-  //     location.href = '/logout';
+  //     location.href = '/public/login.html';
   //   });
   // }
 
@@ -1183,5 +1293,3 @@ document.addEventListener('DOMContentLoaded', () => {
 
 </body>
 </html>
-
-
