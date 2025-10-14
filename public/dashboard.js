@@ -114,6 +114,193 @@ function safeNum(v){ return (v === null || typeof v === 'undefined' || isNaN(Num
 //   return null;
 // }
 
+// ------------------- BEGIN: derived metrics helpers (ADD HERE) -------------------
+
+/**
+ * getBunkerFlow - robustly read a bunker flow value from blend object
+ */
+function getBunkerFlow(blend, idx){
+  try{
+    // common places: blend.flows array or blend.bunkers[idx].flow
+    if(Array.isArray(blend && blend.flows) && typeof blend.flows[idx] !== 'undefined') {
+      const v = safeNum(blend.flows[idx]);
+      if(v !== null) return v;
+    }
+    if(Array.isArray(blend && blend.bunkers) && blend.bunkers[idx] && typeof blend.bunkers[idx].flow !== 'undefined'){
+      const v = safeNum(blend.bunkers[idx].flow);
+      if(v !== null) return v;
+    }
+  }catch(e){}
+  return null;
+}
+
+/**
+ * getBottomGcvForBunker - pick the bottom-most draining layer GCV for a bunker
+ * Strategy:
+ *  1) Prefer bunker.layers (iterate bottom->top, first layer with percent>0).
+ *  2) Fallback: scan blend.rows from bottom->top for a row that maps to this bunker
+ *     (percentages[b] > 0, or row.percent used as legacy for bunker 0).
+ *  3) If row maps to a coal id/name, look up in coalDB for gcv.
+ */
+function getBottomGcvForBunker(blend, coalDB, bunkerIndex){
+  try{
+    // 1) from bunker.layers
+    if(Array.isArray(blend && blend.bunkers) && blend.bunkers[bunkerIndex] && Array.isArray(blend.bunkers[bunkerIndex].layers)){
+      const layers = blend.bunkers[bunkerIndex].layers;
+      for(let li = layers.length - 1; li >= 0; li--){
+        const L = layers[li];
+        if(!L) continue;
+        // handle percent vs percentages
+        const rawPct = (L.percent === undefined || L.percent === null) ? (L.percentages ? L.percentages : 0) : L.percent;
+        let pctVal = null;
+        if(Array.isArray(rawPct) && rawPct.length) pctVal = safeNum(rawPct[0]);
+        else pctVal = safeNum(rawPct);
+        if(pctVal && pctVal > 0){
+          const g = safeNum(L.gcv);
+          if(g !== null) return g;
+          // try lookup in coalDB by name/id
+          if(L.coal){
+            const keyLower = String(L.coal || '').trim().toLowerCase();
+            const found = (Array.isArray(coalDB) ? coalDB.find(c => {
+              if(!c) return false;
+              if(c.coal && String(c.coal).trim().toLowerCase() === keyLower) return true;
+              if(c.name && String(c.name).trim().toLowerCase() === keyLower) return true;
+              if((c._id || c.id) && String(c._id || c.id) === String(L.coal)) return true;
+              return false;
+            }) : null);
+            if(found && (found.gcv !== undefined && found.gcv !== null)) return safeNum(found.gcv);
+          }
+        }
+      }
+    }
+
+    // 2) fallback: scan blend.rows bottom->top to find a row that maps to this bunker
+    if(Array.isArray(blend && blend.rows)){
+      for(let r = blend.rows.length - 1; r >= 0; r--){
+        const row = blend.rows[r];
+        if(!row) continue;
+        let p = null;
+        if(Array.isArray(row.percentages) && row.percentages.length > bunkerIndex){
+          p = safeNum(row.percentages[bunkerIndex]);
+        } else if(typeof row.percent === 'number' && bunkerIndex === 0){
+          p = safeNum(row.percent);
+        } else if(row.percent){
+          p = safeNum(row.percent);
+        }
+        if(p === null || p === 0) continue;
+
+        // candidate row found — try row.gcv first
+        if(row.gcv !== undefined && row.gcv !== null){
+          const g = safeNum(row.gcv);
+          if(g !== null) return g;
+        }
+
+        // else see if row has per-mill coal mapping row.coal[bunkerIndex]
+        if(row.coal && typeof row.coal === 'object' && (row.coal[String(bunkerIndex)] || row.coal[bunkerIndex] )){
+          const ref = row.coal[String(bunkerIndex)] || row.coal[bunkerIndex];
+          const keyLower = String(ref || '').trim().toLowerCase();
+          const found = (Array.isArray(coalDB) ? coalDB.find(c => {
+            if(!c) return false;
+            if(c.coal && String(c.coal).trim().toLowerCase() === keyLower) return true;
+            if(c.name && String(c.name).trim().toLowerCase() === keyLower) return true;
+            if((c._id || c.id) && String(c._id || c.id) === String(ref)) return true;
+            return false;
+          }) : null);
+          if(found && (found.gcv !== undefined && found.gcv !== null)) return safeNum(found.gcv);
+        }
+
+        // last fallback: if row.coal is a simple name/guid and matches coalDB
+        if(row.coal && typeof row.coal === 'string'){
+          const keyLower = String(row.coal).trim().toLowerCase();
+          const found = (Array.isArray(coalDB) ? coalDB.find(c => {
+            if(!c) return false;
+            if(c.coal && String(c.coal).trim().toLowerCase() === keyLower) return true;
+            if(c.name && String(c.name).trim().toLowerCase() === keyLower) return true;
+            if((c._id || c.id) && String(c._id || c.id) === String(row.coal)) return true;
+            return false;
+          }) : null);
+          if(found && (found.gcv !== undefined && found.gcv !== null)) return safeNum(found.gcv);
+        }
+      }
+    }
+  }catch(e){
+    console.error('getBottomGcvForBunker error', e);
+  }
+  return null;
+}
+
+/**
+ * computeDerivedMetrics - computes avgGCV & heatRate using bottom-coal gcv * flow logic
+ * returns { avgGCV: number|null, heatRate: number|null, totalFlow: number|null }
+ */
+function computeDerivedMetrics(blend, coalDB){
+  try{
+    if(!blend) return { avgGCV: null, heatRate: null, totalFlow: null };
+
+    // totalFlow preference: blend.totalFlow if valid else sum of available flows
+    const bf = safeNum(blend.totalFlow);
+    let totalFlow = (bf !== null) ? bf : null;
+
+    let sumNumerator = 0;
+    let sumFlowsForNumerator = 0;
+
+    const bunkerCount = (Array.isArray(blend.bunkers) ? blend.bunkers.length : 8);
+    for(let b = 0; b < bunkerCount; b++){
+      const flowVal = getBunkerFlow(blend, b);
+      const bottomGcv = getBottomGcvForBunker(blend, coalDB, b);
+      if(flowVal !== null && bottomGcv !== null){
+        sumNumerator += (Number(bottomGcv) * Number(flowVal));
+        sumFlowsForNumerator += Number(flowVal);
+      }
+    }
+
+    if(totalFlow === null){
+      // fallback to sumFlowsForNumerator if server totalFlow not present
+      totalFlow = (sumFlowsForNumerator > 0) ? sumFlowsForNumerator : null;
+    }
+
+    const avgGCV = (totalFlow && totalFlow > 0) ? (sumNumerator / totalFlow) : null;
+
+    // generation fallback
+    const generation = safeNum(blend.generation);
+    let heatRate = null;
+    if(avgGCV !== null && totalFlow !== null && generation !== null && generation > 0){
+      heatRate = (avgGCV * Number(totalFlow)) / Number(generation);
+    }
+
+    return { avgGCV: (avgGCV === null ? null : Number(avgGCV)), heatRate: (heatRate === null ? null : Number(heatRate)), totalFlow: (totalFlow === null ? null : Number(totalFlow)) };
+  }catch(e){
+    console.error('computeDerivedMetrics error', e);
+    return { avgGCV: null, heatRate: null, totalFlow: null };
+  }
+}
+
+/**
+ * recomputeAndPopulate - reuses window.LATEST_BLEND & window.COAL_DB to recompute summary metrics
+ */
+function recomputeAndPopulate(){
+  try{
+    const blend = window.LATEST_BLEND || null;
+    const coalDB = window.COAL_DB || [];
+    if(!blend) return;
+    const derived = computeDerivedMetrics(blend, coalDB);
+
+    // preserve other metrics that server may provide
+    const metrics = {
+      generation: (blend.generation !== undefined ? blend.generation : null),
+      totalFlow: (derived.totalFlow !== null ? derived.totalFlow : (blend.totalFlow !== undefined ? blend.totalFlow : null)),
+      avgGCV: (derived.avgGCV !== null ? derived.avgGCV : (blend.avgGCV !== undefined ? blend.avgGCV : null)),
+      avgAFT: (blend.avgAFT !== undefined ? blend.avgAFT : null),
+      heatRate: (derived.heatRate !== null ? derived.heatRate : (blend.heatRate !== undefined ? blend.heatRate : null)),
+      costRate: (blend.costRate !== undefined ? blend.costRate : null)
+    };
+    populateStats(metrics);
+  }catch(e){ console.error('recomputeAndPopulate err', e); }
+}
+
+// ------------------- END: derived metrics helpers -------------------
+
+
 /* ---------- Tooltip helpers (floating DOM tooltip) ---------- */
 const coalTip = document.getElementById('coalTooltip');
 function buildTooltipHtml({name, pct, gcv, cost, aft}){
@@ -324,14 +511,31 @@ async function refreshAndRender(activeMode, activeIndex){
     populateStats({});
     return;
   }
-  populateStats({
-    generation: blend.generation,
-    totalFlow: blend.totalFlow,
-    avgGCV: blend.avgGCV,
-    avgAFT: blend.avgAFT,
-    heatRate: blend.heatRate,
-    costRate: blend.costRate
-  });
+  // compute derived avgGCV & heatRate client-side (prefer bottom-coal * flow approach)
+  try{
+    // keep server-provided COAL_DB already loaded above
+    const derived = computeDerivedMetrics(blend, window.COAL_DB || []);
+    const metrics = {
+      generation: (blend.generation !== undefined ? blend.generation : null),
+      totalFlow: (derived.totalFlow !== null ? derived.totalFlow : (blend.totalFlow !== undefined ? blend.totalFlow : null)),
+      avgGCV: (derived.avgGCV !== null ? derived.avgGCV : (blend.avgGCV !== undefined ? blend.avgGCV : null)),
+      avgAFT: (blend.avgAFT !== undefined ? blend.avgAFT : null),
+      heatRate: (derived.heatRate !== null ? derived.heatRate : (blend.heatRate !== undefined ? blend.heatRate : null)),
+      costRate: (blend.costRate !== undefined ? blend.costRate : null)
+    };
+    populateStats(metrics);
+  }catch(e){
+    // fallback to server-provided values if anything goes wrong
+    populateStats({
+      generation: blend.generation,
+      totalFlow: blend.totalFlow,
+      avgGCV: blend.avgGCV,
+      avgAFT: blend.avgAFT,
+      heatRate: blend.heatRate,
+      costRate: blend.costRate
+    });
+  }
+
 
   if(activeMode === 'overview'){
     renderOverview(blend, coalDB);
@@ -381,6 +585,19 @@ document.addEventListener('DOMContentLoaded', () => {
   setActiveTab('overview', null);
   refreshAndRender('overview', 0).catch(e => console.error(e));
 
+    // keep summary updated when flows or blends or next-blend timers change
+  window.addEventListener('flows:update', function(){ recomputeAndPopulate(); }, false);
+  window.addEventListener('blend:updated', function(){ 
+    // ensure we refresh stored LATEST_BLEND if other code updates it, then recompute
+    try{ if(typeof refreshAndRender === 'function') { /* avoid refetch */ window.LATEST_BLEND = window.LATEST_BLEND || window.LATEST_BLEND; } }catch(e){}
+    recomputeAndPopulate();
+  }, false);
+
+  // periodic short tick to catch internal binder state changes (e.g. nextBlendBinder idx advancement)
+  // optional: 1000ms gives smooth update of Avg GCV/Heat Rate as bottom coal changes
+  window.__derivedMetrics_recompute_timer = setInterval(recomputeAndPopulate, 1000);
+
+
   // optional periodic update to re-fetch (kept but can be removed)
   // setInterval(() => {
   //   const active = document.querySelector('.sidebar .item.active');
@@ -389,4 +606,3 @@ document.addEventListener('DOMContentLoaded', () => {
   //   refreshAndRender(mode, idx).catch(e => console.error(e));
   // }, 12000);
 });
-
