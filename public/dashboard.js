@@ -142,15 +142,36 @@ function getBunkerFlow(blend, idx){
  *     (percentages[b] > 0, or row.percent used as legacy for bunker 0).
  *  3) If row maps to a coal id/name, look up in coalDB for gcv.
  */
+// --- Replace the existing getBottomGcvForBunker with this version ---
 function getBottomGcvForBunker(blend, coalDB, bunkerIndex){
   try{
-    // 1) from bunker.layers
+    // 0) If a client-side binder exists, prefer its active layer (it represents the layer currently draining)
+    if(window.nextBlendBinder && typeof window.nextBlendBinder.getActiveLayer === 'function'){
+      const activeLayer = window.nextBlendBinder.getActiveLayer(bunkerIndex);
+      if(activeLayer){
+        const g = safeNum(activeLayer.gcv);
+        if(g !== null) return g;
+        // fallback: try lookup by activeLayer.coal similar to older logic
+        if(activeLayer.coal){
+          const keyLower = String(activeLayer.coal || '').trim().toLowerCase();
+          const found = (Array.isArray(coalDB) ? coalDB.find(c => {
+            if(!c) return false;
+            if(c.coal && String(c.coal).trim().toLowerCase() === keyLower) return true;
+            if(c.name && String(c.name).trim().toLowerCase() === keyLower) return true;
+            if((c._id || c.id) && String(c._id || c.id) === String(activeLayer.coal)) return true;
+            return false;
+          }) : null);
+          if(found && (found.gcv !== undefined && found.gcv !== null)) return safeNum(found.gcv);
+        }
+      }
+    }
+
+    // 1) from bunker.layers (bottom->top)
     if(Array.isArray(blend && blend.bunkers) && blend.bunkers[bunkerIndex] && Array.isArray(blend.bunkers[bunkerIndex].layers)){
       const layers = blend.bunkers[bunkerIndex].layers;
       for(let li = layers.length - 1; li >= 0; li--){
         const L = layers[li];
         if(!L) continue;
-        // handle percent vs percentages
         const rawPct = (L.percent === undefined || L.percent === null) ? (L.percentages ? L.percentages : 0) : L.percent;
         let pctVal = null;
         if(Array.isArray(rawPct) && rawPct.length) pctVal = safeNum(rawPct[0]);
@@ -158,7 +179,6 @@ function getBottomGcvForBunker(blend, coalDB, bunkerIndex){
         if(pctVal && pctVal > 0){
           const g = safeNum(L.gcv);
           if(g !== null) return g;
-          // try lookup in coalDB by name/id
           if(L.coal){
             const keyLower = String(L.coal || '').trim().toLowerCase();
             const found = (Array.isArray(coalDB) ? coalDB.find(c => {
@@ -174,7 +194,7 @@ function getBottomGcvForBunker(blend, coalDB, bunkerIndex){
       }
     }
 
-    // 2) fallback: scan blend.rows bottom->top to find a row that maps to this bunker
+    // 2) fallback: scan blend.rows bottom->top (legacy behavior)
     if(Array.isArray(blend && blend.rows)){
       for(let r = blend.rows.length - 1; r >= 0; r--){
         const row = blend.rows[r];
@@ -189,13 +209,11 @@ function getBottomGcvForBunker(blend, coalDB, bunkerIndex){
         }
         if(p === null || p === 0) continue;
 
-        // candidate row found — try row.gcv first
         if(row.gcv !== undefined && row.gcv !== null){
           const g = safeNum(row.gcv);
           if(g !== null) return g;
         }
 
-        // else see if row has per-mill coal mapping row.coal[bunkerIndex]
         if(row.coal && typeof row.coal === 'object' && (row.coal[String(bunkerIndex)] || row.coal[bunkerIndex] )){
           const ref = row.coal[String(bunkerIndex)] || row.coal[bunkerIndex];
           const keyLower = String(ref || '').trim().toLowerCase();
@@ -209,7 +227,6 @@ function getBottomGcvForBunker(blend, coalDB, bunkerIndex){
           if(found && (found.gcv !== undefined && found.gcv !== null)) return safeNum(found.gcv);
         }
 
-        // last fallback: if row.coal is a simple name/guid and matches coalDB
         if(row.coal && typeof row.coal === 'string'){
           const keyLower = String(row.coal).trim().toLowerCase();
           const found = (Array.isArray(coalDB) ? coalDB.find(c => {
@@ -228,6 +245,197 @@ function getBottomGcvForBunker(blend, coalDB, bunkerIndex){
   }
   return null;
 }
+
+/* ---------- NextBlendBinder: use DB timers (or fallback percent flow calc) to drive active layer countdowns ---------- */
+
+function parseTimerToSeconds(timerVal){
+  if(timerVal === null || typeof timerVal === 'undefined') return null;
+  if(typeof timerVal === 'number' && Number.isFinite(timerVal)) return Math.max(0, Math.floor(timerVal));
+  if(typeof timerVal === 'object'){
+    if(timerVal.$numberInt) return Math.max(0, Number(timerVal.$numberInt) | 0);
+    if(timerVal.$numberDouble) return Math.max(0, Math.floor(Number(timerVal.$numberDouble)));
+    try { timerVal = String(timerVal); } catch(e){ return null; }
+  }
+  const s = String(timerVal).trim();
+  if(!s) return null;
+  if(s.indexOf(':') >= 0){
+    const parts = s.split(':').map(x => Number(x.replace(/^0+/, '') || 0));
+    if(parts.length === 3 && parts.every(p => !isNaN(p))){
+      return parts[0]*3600 + parts[1]*60 + parts[2];
+    } else if(parts.length === 2 && parts.every(p => !isNaN(p))){
+      return parts[0]*60 + parts[1];
+    }
+    const m = s.match(/(\d+)/g);
+    if(m && m.length) return Math.max(0, Number(m.join('')));
+    return null;
+  }
+  const n = Number(s.replace(/[^0-9\.\-]/g,''));
+  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : null;
+}
+
+function buildSequencesFromBlend(blend){
+  const BUNKER_COUNT = (Array.isArray(blend && blend.bunkers) ? blend.bunkers.length : 8);
+  const capacity = safeNum(blend && blend.bunkerCapacity);
+  const seqs = Array.from({length: BUNKER_COUNT}, () => []);
+  for(let b = 0; b < BUNKER_COUNT; b++){
+    const fVal = getBunkerFlow(blend, b);
+    const bdata = (Array.isArray(blend && blend.bunkers) && blend.bunkers[b]) ? blend.bunkers[b] : { layers: [] };
+    const layers = Array.isArray(bdata.layers) ? bdata.layers.slice() : [];
+    // iterate bottom->top (last -> first)
+    for(let li = layers.length - 1; li >= 0; li--){
+      const L = layers[li];
+      if(!L){ seqs[b].push(null); continue; }
+      // prefer explicit layer.timer
+      const tsec = parseTimerToSeconds(L.timer);
+      if(tsec !== null && !isNaN(tsec)){
+        seqs[b].push(Math.max(0, Math.floor(tsec)));
+        continue;
+      }
+      // otherwise use percent -> seconds if possible
+      const rawPct = (L.percent === undefined || L.percent === null) ? (L.percentages ? L.percentages : 0) : L.percent;
+      let pct = 0;
+      if(Array.isArray(rawPct) && rawPct.length) pct = safeNum(rawPct[0]) || 0;
+      else pct = safeNum(rawPct) || 0;
+      if(pct === 0){
+        seqs[b].push(null);
+        continue;
+      }
+      if(capacity !== null && fVal !== null && fVal > 0){
+        const hours = (pct / 100) * Number(capacity) / Number(fVal);
+        const seconds = Math.max(0, Math.ceil(hours * 3600));
+        seqs[b].push(seconds);
+      } else {
+        seqs[b].push(null);
+      }
+    }
+  }
+  return seqs;
+}
+
+class NextBlendBinder {
+  constructor(blend){
+    this.blend = blend || null;
+    this.sequences = buildSequencesFromBlend(this.blend || {});
+    // active index per bunker (index into sequences[b], 0 = bottom)
+    this.activeIdx = Array.from({length: this.sequences.length}, () => null);
+    // remaining seconds per bunker
+    this.remaining = Array.from({length: this.sequences.length}, () => null);
+    this._tickHandle = null;
+    this._lastDispatchedSnapshot = null;
+    // initialize active / remaining
+    this._resetFromSequences();
+  }
+
+  _resetFromSequences(){
+    for(let b = 0; b < this.sequences.length; b++){
+      const seq = this.sequences[b] || [];
+      // find first valid (non-null) element (bottom-most)
+      let found = null;
+      for(let i = 0; i < seq.length; i++){ if(seq[i] !== null && typeof seq[i] !== 'undefined'){ found = i; break; } }
+      if(found !== null){
+        this.activeIdx[b] = found;
+        this.remaining[b] = seq[found];
+      } else {
+        this.activeIdx[b] = null;
+        this.remaining[b] = null;
+      }
+    }
+    this._maybeDispatch();
+  }
+
+  updateBlend(newBlend){
+    this.blend = newBlend || null;
+    const newSeq = buildSequencesFromBlend(this.blend || {});
+    // replace sequences, and attempt to preserve remaining if possible:
+    // simple approach: if the previous remaining is null or we can't map, reset to DB values
+    this.sequences = newSeq;
+    this.activeIdx = Array.from({length: this.sequences.length}, () => null);
+    this.remaining = Array.from({length: this.sequences.length}, () => null);
+    this._resetFromSequences();
+  }
+
+  start(){
+    if(this._tickHandle) return;
+    this._tickHandle = setInterval(() => this._tick(), 1000);
+    // dispatch once immediately so UI can use binder state
+    this._maybeDispatch(true);
+  }
+
+  stop(){
+    if(this._tickHandle){ clearInterval(this._tickHandle); this._tickHandle = null; }
+  }
+
+  _tick(){
+    let changed = false;
+    for(let b = 0; b < this.sequences.length; b++){
+      const rem = this.remaining[b];
+      if(rem === null || typeof rem === 'undefined') continue;
+      if(rem > 0){
+        this.remaining[b] = rem - 1;
+        changed = true;
+      } else {
+        // rem === 0 -> advance to next valid element in that sequence
+        const seq = this.sequences[b] || [];
+        const currIdx = this.activeIdx[b];
+        let nextIdx = null;
+        if(Array.isArray(seq)){
+          for(let i = (currIdx === null ? 0 : currIdx + 1); i < seq.length; i++){
+            if(seq[i] !== null && typeof seq[i] !== 'undefined'){
+              nextIdx = i;
+              break;
+            }
+          }
+        }
+        if(nextIdx !== null){
+          this.activeIdx[b] = nextIdx;
+          this.remaining[b] = seq[nextIdx];
+          changed = true;
+        } else {
+          // no more layers -> clear
+          if(this.activeIdx[b] !== null || this.remaining[b] !== null){
+            this.activeIdx[b] = null;
+            this.remaining[b] = null;
+            changed = true;
+          }
+        }
+      }
+    }
+    if(changed) this._maybeDispatch();
+  }
+
+  _maybeDispatch(force){
+    // build a small snapshot to compare so we don't constantly dispatch identical events
+    const snapshot = JSON.stringify({activeIdx: this.activeIdx, remaining: this.remaining});
+    if(!force && snapshot === this._lastDispatchedSnapshot) return;
+    this._lastDispatchedSnapshot = snapshot;
+    try{
+      const ev = new CustomEvent('nextBlend:updated', { detail: { activeIdx: this.activeIdx.slice(), remaining: this.remaining.slice() } });
+      window.dispatchEvent(ev);
+    }catch(e){}
+  }
+
+  // return the active layer object for a bunker (from the latest blend),
+  // or null if none. This makes downstream lookups simple.
+  getActiveLayer(bunkerIndex){
+    try{
+      if(!this.blend || !Array.isArray(this.blend.bunkers) || !Array.isArray(this.blend.bunkers[bunkerIndex].layers)) return null;
+      const layers = this.blend.bunkers[bunkerIndex].layers;
+      const idxInSeq = this.activeIdx[bunkerIndex];
+      if(idxInSeq === null || typeof idxInSeq === 'undefined') return null;
+      // sequences are built bottom->top by iterating layers from end->0; mapping:
+      // originalLayerIndex = layers.length - 1 - idxInSeq
+      const orig = (layers.length - 1 - idxInSeq);
+      if(orig < 0 || orig >= layers.length) return null;
+      return layers[orig] || null;
+    }catch(e){
+      return null;
+    }
+  }
+}
+
+// expose class for debug
+window.NextBlendBinder = NextBlendBinder;
+
 
 /**
  * computeDerivedMetrics - computes avgGCV & heatRate using bottom-coal gcv * flow logic
@@ -507,6 +715,17 @@ async function refreshAndRender(activeMode, activeIndex){
   try { syncColorMapFromCoalDB(window.COAL_DB); } catch(e){ /* ignore */ }
   window.LATEST_BLEND = blend || null;
 
+    // --- binder: keep client-side timer sequences in sync with latest blend ---
+  try{
+    if(window.nextBlendBinder){
+      window.nextBlendBinder.updateBlend(blend || {});
+    } else {
+      window.nextBlendBinder = new NextBlendBinder(blend || {});
+      window.nextBlendBinder.start();
+    }
+  }catch(e){ console.error('binder init error', e); }
+
+
   if(!blend){
     populateStats({});
     return;
@@ -592,6 +811,7 @@ document.addEventListener('DOMContentLoaded', () => {
     try{ if(typeof refreshAndRender === 'function') { /* avoid refetch */ window.LATEST_BLEND = window.LATEST_BLEND || window.LATEST_BLEND; } }catch(e){}
     recomputeAndPopulate();
   }, false);
+   window.addEventListener('nextBlend:updated', function(){ recomputeAndPopulate(); }, false);
 
   // periodic short tick to catch internal binder state changes (e.g. nextBlendBinder idx advancement)
   // optional: 1000ms gives smooth update of Avg GCV/Heat Rate as bottom coal changes
