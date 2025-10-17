@@ -1249,33 +1249,82 @@ if (valEl) {
 </script>
 
 <script>
-/* Block table script left unchanged (keeps working) */
+/* Block table script (GCV & Cost removed, white border added) */
 (function () {
-  const statsPanel = document.getElementById('statsPanel'); if (!statsPanel) return; if (document.getElementById('blockTableWrap')) return;
-  const wrap = document.createElement('div'); wrap.id = 'blockTableWrap'; wrap.className = 'block-table-wrap'; wrap.innerHTML = `
+  const statsPanel = document.getElementById('statsPanel');
+  if (!statsPanel) return;
+  if (document.getElementById('blockTableWrap')) return;
+
+  const wrap = document.createElement('div');
+  wrap.id = 'blockTableWrap';
+  wrap.className = 'block-table-wrap';
+  wrap.innerHTML = `
       <div style="font-size:13px;font-weight:800;margin-bottom:6px;">Next Blocks</div>
-      <table class="block-table" id="blockTable" aria-label="Next blocks table">
+      <table class="block-table" id="blockTable" aria-label="Next blocks table"
+        style="width:100%; border-collapse:collapse; border:1px solid white; color:white;">
         <thead>
-          <tr><th style="width:48%;">Block</th><th style="width:26%;">GCV</th><th style="width:26%;">Cost</th></tr>
+          <tr>
+            <th style="border:1px solid white; padding:4px;">Block</th>
+          </tr>
         </thead>
         <tbody>
-          <tr id="blockRow-0"><td class="block-time">--</td><td id="gcv-0">--</td><td id="cost-0">--</td></tr>
-          <tr id="blockRow-1"><td class="block-time">--</td><td id="gcv-1">--</td><td id="cost-1">--</td></tr>
-          <tr id="blockRow-2"><td class="block-time">--</td><td id="gcv-2">--</td><td id="cost-2">--</td></tr>
-          <tr id="blockRow-3"><td class="block-time">--</td><td id="gcv-3">--</td><td id="cost-3">--</td></tr>
+          <tr id="blockRow-0"><td class="block-time" style="border:1px solid white; padding:4px;">--</td></tr>
+          <tr id="blockRow-1"><td class="block-time" style="border:1px solid white; padding:4px;">--</td></tr>
+          <tr id="blockRow-2"><td class="block-time" style="border:1px solid white; padding:4px;">--</td></tr>
+          <tr id="blockRow-3"><td class="block-time" style="border:1px solid white; padding:4px;">--</td></tr>
         </tbody>
       </table>
       <div class="note" style="color:rgba(255,255,255,0.8);"></div>
     `;
   statsPanel.appendChild(wrap);
-  function fmt(date) { const hh = String(date.getHours()).padStart(2,'0'); const mm = String(date.getMinutes()).padStart(2,'0'); return `${hh}:${mm}`; }
-  function nextQuarterStart(now) { const totalMinutes = now.getHours() * 60 + now.getMinutes() + now.getSeconds() / 60; const startMinutes = Math.ceil(totalMinutes / 15) * 15; const h = Math.floor(startMinutes / 60) % 24; const m = startMinutes % 60; const d = new Date(now.getTime()); d.setHours(h, m, 0, 0); return d; }
-  function buildBlockLabels() { const now = new Date(); const firstStart = nextQuarterStart(now); const labels = []; for (let i = 0; i < 4; i++) { const start = new Date(firstStart.getTime() + i * 15 * 60 * 1000); const end = new Date(start.getTime() + 15 * 60 * 1000); labels.push(`${fmt(start)} - ${fmt(end)}`); } return labels; }
-  window.setBlockData = function (index, gcv, cost) { if (index < 0 || index > 3) return; const gcvCell = document.getElementById(`gcv-${index}`); const costCell = document.getElementById(`cost-${index}`); if (gcvCell) gcvCell.textContent = (gcv === null || gcv === undefined) ? '--' : String(gcv); if (costCell) costCell.textContent = (cost === null || cost === undefined) ? '--' : String(cost); };
-  function updateBlockTable() { const labels = buildBlockLabels(); for (let i = 0; i < 4; i++) { const row = document.getElementById(`blockRow-${i}`); if (!row) continue; const timeCell = row.querySelector('.block-time'); if (timeCell) timeCell.textContent = labels[i]; const gcv = document.getElementById(`gcv-${i}`).textContent; const cost = document.getElementById(`cost-${i}`).textContent; if (!gcv || gcv.trim() === '') document.getElementById(`gcv-${i}`).textContent = '--'; if (!cost || cost.trim() === '') document.getElementById(`cost-${i}`).textContent = '--'; } }
-  updateBlockTable(); const refreshBtn = document.getElementById('refreshBtn'); if (refreshBtn) { refreshBtn.addEventListener('click', updateBlockTable); }
+
+  function fmt(date) {
+    const hh = String(date.getHours()).padStart(2, '0');
+    const mm = String(date.getMinutes()).padStart(2, '0');
+    return `${hh}:${mm}`;
+  }
+
+  function nextQuarterStart(now) {
+    const totalMinutes = now.getHours() * 60 + now.getMinutes() + now.getSeconds() / 60;
+    const startMinutes = Math.ceil(totalMinutes / 15) * 15;
+    const h = Math.floor(startMinutes / 60) % 24;
+    const m = startMinutes % 60;
+    const d = new Date(now.getTime());
+    d.setHours(h, m, 0, 0);
+    return d;
+  }
+
+  function buildBlockLabels() {
+    const now = new Date();
+    const firstStart = nextQuarterStart(now);
+    const labels = [];
+    for (let i = 0; i < 4; i++) {
+      const start = new Date(firstStart.getTime() + i * 15 * 60 * 1000);
+      const end = new Date(start.getTime() + 15 * 60 * 1000);
+      labels.push(`${fmt(start)} - ${fmt(end)}`);
+    }
+    return labels;
+  }
+
+  function updateBlockTable() {
+    const labels = buildBlockLabels();
+    for (let i = 0; i < 4; i++) {
+      const row = document.getElementById(`blockRow-${i}`);
+      if (!row) continue;
+      const timeCell = row.querySelector('.block-time');
+      if (timeCell) timeCell.textContent = labels[i];
+    }
+  }
+
+  updateBlockTable();
+
+  const refreshBtn = document.getElementById('refreshBtn');
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', updateBlockTable);
+  }
 })();
 </script>
+
 
 <script>
 /* Wiring: expose tooltip functions and sidebar toggle + adapt sidebar click handlers to new markup */
