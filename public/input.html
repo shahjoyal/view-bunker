@@ -545,6 +545,32 @@ html, body {
   top: calc(var(--bunker-top-line-distance) + 4px);
 }
 
+/* ===== blinking timer styles (paste into your existing <style>) ===== */
+@keyframes blink-red-white {
+  0%   { background-color: #ffffff; color: #0b0b0b; }
+  50%  { background-color: #ff4d4d; color: #ffffff; }
+  100% { background-color: #ffffff; color: #0b0b0b; }
+}
+
+/* apply animation to the small value node so only timer blinks */
+.coal-box .value.blinking {
+  animation: blink-red-white 1s linear infinite;
+  padding: 2px 6px;          /* small padding so background looks neat */
+  border-radius: 6px;
+  display: inline-block;     /* keep layout stable */
+  box-shadow: 0 4px 12px rgba(255,77,77,0.08);
+}
+
+/* optional: a 'done' state styling */
+.coal-box .value.done {
+  background: #0ea5a0;       /* teal-ish when done */
+  color: #fff;
+  padding: 2px 6px;
+  border-radius: 6px;
+  display: inline-block;
+}
+
+
 
   </style>
 
@@ -897,17 +923,43 @@ html, body {
     return seqs;
   }
 
-  function updateNextBlendUI(){
-    for(let i=0;i<BUNKER_COUNT;i++){
-      const el = document.getElementById(BOX_PREFIX + i);
-      if(!el) continue;
-      const valEl = el.querySelector('.value');
-      const st = state[i];
-      if(!st || st.remaining === null || st.remaining === undefined){ valEl.innerText = '--'; }
-      else if(st.remaining === 0 && (st.idx >= (st.sequence ? st.sequence.length : 0))){ valEl.innerText = 'Done'; }
-      else { valEl.innerText = formatHMS(st.remaining); }
+function updateNextBlendUI(){
+  for(let i=0;i<BUNKER_COUNT;i++){
+    const el = document.getElementById(BOX_PREFIX + i);
+    if(!el) continue;
+    const valEl = el.querySelector('.value');
+    const st = state[i];
+
+    // clear classes first (keeps visual state sane)
+    if(valEl){
+      valEl.classList.remove('blinking');
+      valEl.classList.remove('done');
+    }
+
+    if(!st || st.remaining === null || st.remaining === undefined){
+      if(valEl) valEl.innerText = '--';
+    }
+    else if(st.remaining === 0 && (st.idx >= (st.sequence ? st.sequence.length : 0))){
+      if(valEl){
+        valEl.innerText = 'Done';
+        // optional: mark done visually (use .done)
+        valEl.classList.add('done');
+      }
+    }
+    else {
+      if(valEl) valEl.innerText = formatHMS(st.remaining);
+
+      // If less than 1 hour but greater than 0 -> blinking
+      if(typeof st.remaining === 'number' && st.remaining > 0 && st.remaining < 3600){
+        if(valEl) valEl.classList.add('blinking');
+      } else {
+        // otherwise ensure blinking removed (already removed above, left for clarity)
+        if(valEl) valEl.classList.remove('blinking');
+      }
     }
   }
+}
+
 
   function seqHash(seq){ if(!Array.isArray(seq)) return ''; return seq.map(x => (x === null ? 'X' : Math.round(x))).join(','); }
 
